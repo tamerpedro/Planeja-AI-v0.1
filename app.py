@@ -121,7 +121,6 @@ def consultar_endpoint(endpoint, params=None, timeout=120):
 
     return response
 
-
 def consultar_paginas(endpoint, params_base, tamanho_pagina=500, max_paginas=20, timeout=120):
     resultados = []
     erros = []
@@ -160,12 +159,28 @@ def consultar_paginas(endpoint, params_base, tamanho_pagina=500, max_paginas=20,
 
             pagina_resultados = data.get("resultado", [])
 
+            # Critério mais confiável: página vazia encerra a busca
             if not pagina_resultados:
                 break
 
             resultados.extend(pagina_resultados)
 
-            if total_paginas is not None and pagina >= int(total_paginas):
+            # Só confia em totalPaginas se vier um número válido maior que zero
+            try:
+                total_paginas_int = int(total_paginas) if total_paginas is not None else 0
+            except Exception:
+                total_paginas_int = 0
+
+            if total_paginas_int > 0 and pagina >= total_paginas_int:
+                break
+
+            # Se já carregou todos os registros informados, pode parar
+            try:
+                total_registros_int = int(total_registros) if total_registros is not None else 0
+            except Exception:
+                total_registros_int = 0
+
+            if total_registros_int > 0 and len(resultados) >= total_registros_int:
                 break
 
             time.sleep(0.25)
@@ -179,7 +194,6 @@ def consultar_paginas(endpoint, params_base, tamanho_pagina=500, max_paginas=20,
             break
 
     return resultados, erros, total_registros, total_paginas, urls_consultadas
-
 
 @st.cache_data(ttl=3600)
 def carregar_pdms_ativos(max_paginas=50):
