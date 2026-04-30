@@ -196,25 +196,34 @@ def consultar_paginas(
 
 
 @st.cache_data(ttl=1800)
-def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=10, tamanho_pagina=100):
+def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=10, tamanho_pagina=50):
+    """
+    Consulta CATMATs por PDM.
+
+    Estratégia:
+    1. Não envia statusItem=True para evitar erro 400 em alguns PDMs.
+    2. Filtra itens ativos localmente, se a coluna statusItem vier no retorno.
+    3. Usa tamanho de página menor para reduzir instabilidade da API.
+    """
+
     params = {
         "codigoPdm": int(codigo_pdm)
     }
 
-    if somente_ativos:
-        params["statusItem"] = True
-
     resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
         endpoint="/modulo-material/4_consultarItemMaterial",
         params_base=params,
-        tamanho_pagina=tamanho_pagina,
-        max_paginas=max_paginas,
+        tamanho_pagina=int(tamanho_pagina),
+        max_paginas=int(max_paginas),
         timeout=120,
         tentativas_por_pagina=3,
         pular_pagina_com_erro=True
     )
 
     df = pd.DataFrame(resultados)
+
+    if somente_ativos and not df.empty and "statusItem" in df.columns:
+        df = df[df["statusItem"] == True].copy()
 
     return df, erros, total_registros, total_paginas, urls
 
@@ -646,8 +655,8 @@ with aba_principal:
         tamanho_pagina_catmat = st.number_input(
             "Registros por página no CATMAT",
             min_value=10,
-            max_value=200,
-            value=100,
+            max_value=100,
+            value=50,
             step=10
         )
 
