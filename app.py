@@ -55,9 +55,13 @@ def formatar_brl(valor):
 
 
 def primeira_coluna_existente(df, candidatas):
+    if df is None or df.empty:
+        return None
+
     for coluna in candidatas:
         if coluna in df.columns:
             return coluna
+
     return None
 
 
@@ -66,7 +70,10 @@ def limpar_session_state_precos():
         "resultados_precos",
         "erros_precos",
         "urls_precos",
-        "df_precos"
+        "df_precos",
+        "codigos_catmat_consultados",
+        "data_inicial_precos_final",
+        "data_final_precos_final"
     ]:
         st.session_state.pop(chave, None)
 
@@ -78,6 +85,7 @@ def limpar_session_state_catmat():
         "total_itens",
         "paginas_itens",
         "urls_itens",
+        "diagnostico_itens",
         "codigo_pdm_atual",
         "nome_pdm_atual"
     ]:
@@ -122,12 +130,12 @@ def consultar_paginas(
     for pagina in range(1, int(max_paginas) + 1):
         params = dict(params_base)
         params["pagina"] = pagina
-        params["tamanhoPagina"] = tamanho_pagina
+        params["tamanhoPagina"] = int(tamanho_pagina)
 
         sucesso_pagina = False
         erro_atual = None
 
-        for tentativa in range(1, tentativas_por_pagina + 1):
+        for tentativa in range(1, int(tentativas_por_pagina) + 1):
             try:
                 response = consultar_endpoint(
                     endpoint=endpoint,
@@ -138,7 +146,18 @@ def consultar_paginas(
                 urls_consultadas.append(response.url)
 
                 if response.status_code == 200:
-                    data = response.json()
+                    try:
+                        data = response.json()
+                    except Exception as e:
+                        erro_atual = {
+                            "pagina": pagina,
+                            "tentativa": tentativa,
+                            "status": response.status_code,
+                            "mensagem": f"Erro ao interpretar JSON: {str(e)}",
+                            "url": response.url
+                        }
+                        time.sleep(0.8 * tentativa)
+                        continue
 
                     if total_registros is None:
                         total_registros = data.get("totalRegistros")
@@ -147,7 +166,13 @@ def consultar_paginas(
                     pagina_resultados = data.get("resultado", [])
 
                     if not pagina_resultados:
-                        return resultados, erros, total_registros, total_paginas, urls_consultadas
+                        return (
+                            resultados,
+                            erros,
+                            total_registros,
+                            total_paginas,
+                            urls_consultadas
+                        )
 
                     resultados.extend(pagina_resultados)
                     sucesso_pagina = True
@@ -168,7 +193,8 @@ def consultar_paginas(
                     "pagina": pagina,
                     "tentativa": tentativa,
                     "status": "erro",
-                    "mensagem": str(e)
+                    "mensagem": str(e),
+                    "url": f"{BASE_URL}{endpoint}"
                 }
 
                 time.sleep(0.8 * tentativa)
@@ -284,7 +310,62 @@ def carregar_itens_por_pdm(
         "urls": todas_urls
     }
 
-    return df, todos_erros, melhor_total_registros, melhor_total_paginas, todas_urls, diagnostico
+    return (
+        df,
+        todos_erros,
+        melhor_total_registros,
+        melhor_total_paginas,
+        todas_urls,
+        diagnostico
+    )
+
+
+def consultar_precos_multiplos_catmats(
+    codigos_catmat,
+    data_inicial,
+    data_final,
+    max_paginas_por_catmat=2,
+    tamanho_pagina=50
+):
+    todos_resultados = []
+    todos_erros = []
+    urls = []
+
+    total = len(codigos_catmat)
+
+    if total == 0:
+        return todos_resultados, todos_erros, urls
+
+    progresso = st.progress(0)
+
+    for i, codigo in enumerate(codigos_catmat):
+        params_base = {
+            "codigoItemCatalogo": int(codigo),
+            "dataCompraMin": data_inicial.strftime("%Y-%m-%d"),
+            "dataCompraMax": data_final.strftime("%Y-%m-%d")
+        }
+
+        resultados, erros, _, _, urls_consultadas = consultar_paginas(
+            endpoint="/modulo-pesquisa-preco/1_consultarMaterial",
+            params_base=params_base,
+            tamanho_pagina=int(tamanho_pagina),
+            max_paginas=int(max_paginas_por_catmat),
+            timeout=120,
+            tentativas_por_pagina=3,
+            pular_pagina_com_erro=True
+        )
+
+        for item in resultados:
+            item["catmat_consultado"] = int(codigo)
+
+        todos_resultados.extend(resultados)
+        todos_erros.extend(erros)
+        urls.extend(urls_consultadas)
+
+        progresso.progress((i + 1) / total)
+        time.sleep(0.2)
+
+    return todos_resultados, todos_erros, urls
 
 
 # ============================================================
@@ -326,8 +407,8 @@ def extrair_caracteristicas(descricao):
 
 
 def criar_tabela_caracteristicas(df_itens):
-    if df_itens.empty:
-        return df_itens.copy()
+    if df_itens is None or df_itens.empty:
+        return pd.DataFrame()
 
     coluna_descricao = primeira_coluna_existente(
         df_itens,
@@ -352,7 +433,7 @@ def criar_tabela_caracteristicas(df_itens):
 
 
 def identificar_colunas_caracteristicas(df):
-    if df.empty:
+    if df is None or df.empty:
         return []
 
     colunas = [c for c in df.columns if c.startswith("CARAC_")]
@@ -367,7 +448,6 @@ def identificar_colunas_caracteristicas(df):
         qtd_distintos = serie.nunique()
         cobertura = len(serie) / len(df)
 
-        # Mantém características que tenham utilidade como filtro.
         if 1 <= qtd_distintos <= 100 and cobertura >= 0.03:
             candidatas.append({
                 "coluna": coluna,
@@ -675,7 +755,14 @@ with aba_principal:
         limpar_session_state_catmat()
 
         with st.spinner("Consultando CATMATs do PDM informado..."):
-            df_itens, erros_itens, total_itens, paginas_itens, urls_itens = carregar_itens_por_pdm(
+            (
+                df_itens,
+                erros_itens,
+                total_itens,
+                paginas_itens,
+                urls_itens,
+                diagnostico_itens
+            ) = carregar_itens_por_pdm(
                 codigo_pdm=int(codigo_pdm),
                 somente_ativos=somente_ativos,
                 max_paginas=int(max_paginas_catmat),
@@ -693,6 +780,7 @@ with aba_principal:
         st.session_state["total_itens"] = total_itens
         st.session_state["paginas_itens"] = paginas_itens
         st.session_state["urls_itens"] = urls_itens
+        st.session_state["diagnostico_itens"] = diagnostico_itens
 
     if "df_itens_carac" in st.session_state:
         df_itens_carac = st.session_state["df_itens_carac"]
@@ -700,6 +788,7 @@ with aba_principal:
         total_itens = st.session_state.get("total_itens")
         paginas_itens = st.session_state.get("paginas_itens")
         urls_itens = st.session_state.get("urls_itens", [])
+        diagnostico_itens = st.session_state.get("diagnostico_itens", {})
 
         st.header("3. Filtros dinâmicos por características do PDM")
 
@@ -713,6 +802,10 @@ with aba_principal:
             st.write("URLs consultadas:")
             st.write(urls_itens)
 
+            if diagnostico_itens:
+                st.write("Diagnóstico consolidado:")
+                st.json(diagnostico_itens)
+
             if not df_itens_carac.empty:
                 st.dataframe(df_itens_carac.head(20), use_container_width=True)
 
@@ -721,7 +814,27 @@ with aba_principal:
             st.json(erros_itens)
 
         if df_itens_carac.empty:
-            st.warning("Nenhum CATMAT retornado para o PDM informado.")
+            if diagnostico_itens.get("consulta_teve_erro"):
+                st.error(
+                    "A API do Compras.gov.br retornou erro ao consultar os CATMATs deste PDM. "
+                    "Isso não significa que o PDM não possua CATMATs."
+                )
+
+                st.info(
+                    "Reduza a quantidade de páginas, use poucos registros por página ou tente novamente em outro momento."
+                )
+
+                with st.expander("Diagnóstico técnico da consulta"):
+                    st.json(diagnostico_itens)
+
+            else:
+                st.warning(
+                    "Nenhum CATMAT foi retornado para o PDM informado."
+                )
+
+                with st.expander("Diagnóstico da consulta"):
+                    st.json(diagnostico_itens)
+
         else:
             candidatas = identificar_colunas_caracteristicas(df_itens_carac)
 
@@ -820,7 +933,6 @@ with aba_principal:
                 )
 
                 max_default = min(10, len(codigos_disponiveis))
-
                 codigos_default = codigos_disponiveis[:max_default]
 
                 codigos_selecionados = st.multiselect(
@@ -958,10 +1070,7 @@ with aba_principal:
                 colunas_desc = ["catmat_consultado", descricao_col]
                 colunas_desc = [c for c in colunas_desc if c in df_precos.columns]
 
-                descricoes = (
-                    df_precos[colunas_desc]
-                    .drop_duplicates()
-                )
+                descricoes = df_precos[colunas_desc].drop_duplicates()
                 st.dataframe(descricoes.head(100), use_container_width=True)
 
             csv = df_precos.to_csv(index=False).encode("utf-8-sig")
