@@ -374,33 +374,33 @@ with aba_dinamica:
 
         termo_norm = normalizar_texto(termo_busca)
 
-if termo_norm:
-    mascara = pd.Series(False, index=df_pdms.index)
-
-    colunas_busca = [
-        "nomePdm_norm",
-        "nomeClasse_norm",
-        "nomeGrupo_norm",
-        "nomePdm",
-        "nomeClasse",
-        "nomeGrupo",
-        "descricaoPdm",
-        "descricao"
-    ]
-
-    for coluna in colunas_busca:
-        if coluna in df_pdms.columns:
-            mascara = mascara | (
-                df_pdms[coluna]
-                .fillna("")
-                .astype(str)
-                .apply(normalizar_texto)
-                .str.contains(termo_norm, na=False, regex=False)
-            )
-
-    df_pdm_filtrado = df_pdms[mascara].copy()
-else:
-    df_pdm_filtrado = df_pdms.copy()
+    if termo_norm:
+        mascara = pd.Series(False, index=df_pdms.index)
+    
+        colunas_busca = [
+            "nomePdm_norm",
+            "nomeClasse_norm",
+            "nomeGrupo_norm",
+            "nomePdm",
+            "nomeClasse",
+            "nomeGrupo",
+            "descricaoPdm",
+            "descricao"
+        ]
+    
+        for coluna in colunas_busca:
+            if coluna in df_pdms.columns:
+                mascara = mascara | (
+                    df_pdms[coluna]
+                    .fillna("")
+                    .astype(str)
+                    .apply(normalizar_texto)
+                    .str.contains(termo_norm, na=False, regex=False)
+                )
+    
+        df_pdm_filtrado = df_pdms[mascara].copy()
+    else:
+        df_pdm_filtrado = df_pdms.copy()
         st.write("PDMs carregados:", len(df_pdms))
         st.write("PDMs encontrados para o termo:", len(df_pdm_filtrado))
 
