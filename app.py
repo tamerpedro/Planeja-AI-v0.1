@@ -21,8 +21,7 @@ BASE_URL = "https://dadosabertos.compras.gov.br"
 
 st.title("PlanejaIA - Protótipo inicial")
 st.write(
-    "Normalização dinâmica de objeto por PDM, extração de características técnicas, "
-    "seleção de CATMATs candidatos e consulta de preços no Compras.gov.br."
+    "PDM manual, filtros dinâmicos extraídos dos CATMATs e consulta de preços no Compras.gov.br."
 )
 
 st.divider()
@@ -62,46 +61,29 @@ def primeira_coluna_existente(df, candidatas):
     return None
 
 
-def criar_colunas_normalizadas(df):
-    df = df.copy()
-
-    if df.empty:
-        return df
-
-    for coluna in df.columns:
-        if df[coluna].dtype == "object":
-            df[f"{coluna}_norm"] = df[coluna].apply(normalizar_texto)
-
-    return df
+def limpar_session_state_precos():
+    for chave in [
+        "resultados_precos",
+        "erros_precos",
+        "urls_precos",
+        "df_precos"
+    ]:
+        st.session_state.pop(chave, None)
 
 
-def buscar_em_colunas_textuais(df, termo):
-    if df.empty:
-        return df.copy()
+def limpar_session_state_catmat():
+    for chave in [
+        "df_itens_carac",
+        "erros_itens",
+        "total_itens",
+        "paginas_itens",
+        "urls_itens",
+        "codigo_pdm_atual",
+        "nome_pdm_atual"
+    ]:
+        st.session_state.pop(chave, None)
 
-    termo_norm = normalizar_texto(termo)
-
-    if not termo_norm:
-        return df.copy()
-
-    mascara = pd.Series(False, index=df.index)
-
-    for coluna in df.columns:
-        if df[coluna].dtype == "object" or coluna.endswith("_norm"):
-            serie = (
-                df[coluna]
-                .fillna("")
-                .astype(str)
-                .apply(normalizar_texto)
-            )
-
-            mascara = mascara | serie.str.contains(
-                termo_norm,
-                na=False,
-                regex=False
-            )
-
-    return df[mascara].copy()
+    limpar_session_state_precos()
 
 
 # ============================================================
@@ -121,13 +103,15 @@ def consultar_endpoint(endpoint, params=None, timeout=120):
 
     return response
 
+
 def consultar_paginas(
     endpoint,
     params_base,
     tamanho_pagina=100,
-    max_paginas=200,
+    max_paginas=10,
     timeout=120,
-    tentativas_por_pagina=3
+    tentativas_por_pagina=3,
+    pular_pagina_com_erro=True
 ):
     resultados = []
     erros = []
@@ -141,6 +125,7 @@ def consultar_paginas(
         params["tamanhoPagina"] = tamanho_pagina
 
         sucesso_pagina = False
+        erro_atual = None
 
         for tentativa in range(1, tentativas_por_pagina + 1):
             try:
@@ -166,19 +151,17 @@ def consultar_paginas(
 
                     resultados.extend(pagina_resultados)
                     sucesso_pagina = True
-
                     break
 
-                else:
-                    erro_atual = {
-                        "pagina": pagina,
-                        "tentativa": tentativa,
-                        "status": response.status_code,
-                        "mensagem": response.text,
-                        "url": response.url
-                    }
+                erro_atual = {
+                    "pagina": pagina,
+                    "tentativa": tentativa,
+                    "status": response.status_code,
+                    "mensagem": response.text,
+                    "url": response.url
+                }
 
-                    time.sleep(1.0 * tentativa)
+                time.sleep(0.8 * tentativa)
 
             except Exception as e:
                 erro_atual = {
@@ -188,10 +171,15 @@ def consultar_paginas(
                     "mensagem": str(e)
                 }
 
-                time.sleep(1.0 * tentativa)
+                time.sleep(0.8 * tentativa)
 
         if not sucesso_pagina:
-            erros.append(erro_atual)
+            if erro_atual:
+                erros.append(erro_atual)
+
+            if not pular_pagina_com_erro:
+                break
+
             continue
 
         try:
@@ -202,30 +190,13 @@ def consultar_paginas(
         if total_registros_int > 0 and len(resultados) >= total_registros_int:
             break
 
-        time.sleep(0.25)
+        time.sleep(0.2)
 
     return resultados, erros, total_registros, total_paginas, urls_consultadas
 
-@st.cache_data(ttl=3600)
-def carregar_pdms_ativos(max_paginas=160):
-    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
-        endpoint="/modulo-material/3_consultarPdmMaterial",
-        params_base={
-            "statusPdm": True
-        },
-        tamanho_pagina=100,
-        max_paginas=max_paginas,
-        timeout=120,
-        tentativas_por_pagina=3
-    )
-
-    df = pd.DataFrame(resultados)
-    df = criar_colunas_normalizadas(df)
-
-    return df, erros, total_registros, total_paginas, urls
 
 @st.cache_data(ttl=1800)
-def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=20):
+def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=10, tamanho_pagina=100):
     params = {
         "codigoPdm": int(codigo_pdm)
     }
@@ -236,9 +207,11 @@ def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=20):
     resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
         endpoint="/modulo-material/4_consultarItemMaterial",
         params_base=params,
-        tamanho_pagina=500,
+        tamanho_pagina=tamanho_pagina,
         max_paginas=max_paginas,
-        timeout=120
+        timeout=120,
+        tentativas_por_pagina=3,
+        pular_pagina_com_erro=True
     )
 
     df = pd.DataFrame(resultados)
@@ -246,7 +219,13 @@ def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=20):
     return df, erros, total_registros, total_paginas, urls
 
 
-def consultar_precos_multiplos_catmats(codigos_catmat, data_inicial, data_final, max_paginas_por_catmat=2):
+def consultar_precos_multiplos_catmats(
+    codigos_catmat,
+    data_inicial,
+    data_final,
+    max_paginas_por_catmat=2,
+    tamanho_pagina=50
+):
     todos_resultados = []
     todos_erros = []
     urls = []
@@ -268,9 +247,11 @@ def consultar_precos_multiplos_catmats(codigos_catmat, data_inicial, data_final,
         resultados, erros, _, _, urls_consultadas = consultar_paginas(
             endpoint="/modulo-pesquisa-preco/1_consultarMaterial",
             params_base=params_base,
-            tamanho_pagina=50,
+            tamanho_pagina=tamanho_pagina,
             max_paginas=max_paginas_por_catmat,
-            timeout=120
+            timeout=120,
+            tentativas_por_pagina=3,
+            pular_pagina_com_erro=True
         )
 
         for item in resultados:
@@ -281,16 +262,28 @@ def consultar_precos_multiplos_catmats(codigos_catmat, data_inicial, data_final,
         urls.extend(urls_consultadas)
 
         progresso.progress((i + 1) / total)
-        time.sleep(0.25)
+        time.sleep(0.2)
 
     return todos_resultados, todos_erros, urls
 
 
 # ============================================================
-# FUNÇÕES DE CARACTERÍSTICAS CATMAT
+# EXTRAÇÃO DINÂMICA DE CARACTERÍSTICAS
 # ============================================================
 
 def extrair_caracteristicas(descricao):
+    """
+    Extrai pares 'CHAVE: VALOR' da descrição do CATMAT.
+
+    Exemplo:
+    NOTEBOOK, TELA: SUPERIOR A 14 POL, MEMÓRIA RAM: MÍNIMO DE 16 GB
+    vira:
+    {
+        "TELA": "SUPERIOR A 14 POL",
+        "MEMORIA RAM": "MÍNIMO DE 16 GB"
+    }
+    """
+
     if descricao is None or pd.isna(descricao):
         return {}
 
@@ -302,6 +295,7 @@ def extrair_caracteristicas(descricao):
     for parte in partes:
         if ":" in parte:
             chave, valor = parte.split(":", 1)
+
             chave = normalizar_texto(chave)
             valor = str(valor).strip().upper()
 
@@ -353,7 +347,8 @@ def identificar_colunas_caracteristicas(df):
         qtd_distintos = serie.nunique()
         cobertura = len(serie) / len(df)
 
-        if 2 <= qtd_distintos <= 80 and cobertura >= 0.05:
+        # Mantém características que tenham utilidade como filtro.
+        if 1 <= qtd_distintos <= 100 and cobertura >= 0.03:
             candidatas.append({
                 "coluna": coluna,
                 "nome": coluna.replace("CARAC_", ""),
@@ -381,7 +376,7 @@ def aplicar_filtros_dinamicos(df, filtros):
 
 
 # ============================================================
-# ESTATÍSTICAS
+# ESTATÍSTICAS E RESUMOS
 # ============================================================
 
 def exibir_estatisticas_precos(df):
@@ -394,7 +389,7 @@ def exibir_estatisticas_precos(df):
 
     if coluna_preco is None:
         st.warning("Não foi encontrada coluna de preço unitário no retorno da API.")
-        return
+        return {}
 
     df_calc = df.copy()
     df_calc[coluna_preco] = pd.to_numeric(df_calc[coluna_preco], errors="coerce")
@@ -402,243 +397,282 @@ def exibir_estatisticas_precos(df):
 
     if df_precos.empty:
         st.warning("Não há preços válidos para cálculo estatístico.")
-        return
+        return {}
+
+    estatisticas = {
+        "registros_com_preco": int(len(df_precos)),
+        "menor_preco": float(df_precos[coluna_preco].min()),
+        "maior_preco": float(df_precos[coluna_preco].max()),
+        "preco_medio": float(df_precos[coluna_preco].mean()),
+        "mediana": float(df_precos[coluna_preco].median())
+    }
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
-    col1.metric("Registros com preço", len(df_precos))
-    col2.metric("Menor preço", formatar_brl(df_precos[coluna_preco].min()))
-    col3.metric("Maior preço", formatar_brl(df_precos[coluna_preco].max()))
-    col4.metric("Preço médio", formatar_brl(df_precos[coluna_preco].mean()))
-    col5.metric("Mediana", formatar_brl(df_precos[coluna_preco].median()))
+    col1.metric("Registros com preço", estatisticas["registros_com_preco"])
+    col2.metric("Menor preço", formatar_brl(estatisticas["menor_preco"]))
+    col3.metric("Maior preço", formatar_brl(estatisticas["maior_preco"]))
+    col4.metric("Preço médio", formatar_brl(estatisticas["preco_medio"]))
+    col5.metric("Mediana", formatar_brl(estatisticas["mediana"]))
 
     st.caption(
         "A média pode ser distorcida por outliers. Para planejamento preliminar, "
         "a mediana tende a ser uma referência mais robusta."
     )
 
+    return estatisticas
+
+
+def gerar_resumo_dod(
+    demanda_texto,
+    quantidade,
+    codigo_pdm,
+    nome_pdm,
+    codigos_catmat,
+    df_precos,
+    estatisticas,
+    data_inicial,
+    data_final
+):
+    fornecedor_col = primeira_coluna_existente(
+        df_precos,
+        ["nomeFornecedor", "fornecedor", "razaoSocialFornecedor"]
+    )
+
+    orgao_col = primeira_coluna_existente(
+        df_precos,
+        ["nomeOrgao", "orgao", "nomeOrgaoSuperior"]
+    )
+
+    descricao_col = primeira_coluna_existente(
+        df_precos,
+        ["descricaoItem", "descricao", "descricao_item"]
+    )
+
+    fornecedores = []
+    orgaos = []
+    descricoes = []
+
+    if fornecedor_col:
+        fornecedores = (
+            df_precos[fornecedor_col]
+            .fillna("Não informado")
+            .value_counts()
+            .head(10)
+            .index
+            .tolist()
+        )
+
+    if orgao_col:
+        orgaos = (
+            df_precos[orgao_col]
+            .fillna("Não informado")
+            .value_counts()
+            .head(10)
+            .index
+            .tolist()
+        )
+
+    if descricao_col:
+        descricoes = (
+            df_precos[descricao_col]
+            .dropna()
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+
+    resumo = {
+        "demanda": demanda_texto,
+        "quantidade_estimada": quantidade,
+        "codigo_pdm": codigo_pdm,
+        "nome_pdm": nome_pdm,
+        "catmats_considerados": codigos_catmat,
+        "periodo_pesquisa": {
+            "data_inicial": data_inicial.strftime("%Y-%m-%d"),
+            "data_final": data_final.strftime("%Y-%m-%d")
+        },
+        "registros_de_preco": int(len(df_precos)),
+        "estatisticas": {
+            "registros_com_preco": estatisticas.get("registros_com_preco"),
+            "menor_preco": formatar_brl(estatisticas.get("menor_preco")),
+            "maior_preco": formatar_brl(estatisticas.get("maior_preco")),
+            "preco_medio": formatar_brl(estatisticas.get("preco_medio")),
+            "mediana": formatar_brl(estatisticas.get("mediana"))
+        },
+        "fornecedores_recorrentes": fornecedores,
+        "orgaos_compradores_recorrentes": orgaos,
+        "descricoes_de_itens_encontradas": descricoes
+    }
+
+    return resumo
+
+
+def gerar_texto_base_dod(resumo):
+    demanda = resumo.get("demanda", "")
+    quantidade = resumo.get("quantidade_estimada", "")
+    codigo_pdm = resumo.get("codigo_pdm", "")
+    nome_pdm = resumo.get("nome_pdm", "")
+    catmats = resumo.get("catmats_considerados", [])
+    estat = resumo.get("estatisticas", {})
+    periodo = resumo.get("periodo_pesquisa", {})
+
+    texto = f"""
+## Minuta preliminar de insumos para DOD
+
+### 1. Descrição da demanda
+
+A presente demanda trata da necessidade de contratação relacionada ao seguinte objeto:
+
+**{demanda}**
+
+A quantidade preliminar estimada é de **{quantidade} unidade(s)**.
+
+### 2. Normalização preliminar do objeto
+
+Para fins de pesquisa inicial no Catálogo de Materiais do Compras.gov.br, foi utilizado o seguinte PDM:
+
+- **PDM:** {codigo_pdm} - {nome_pdm}
+
+A partir desse PDM, foram identificados e filtrados CATMATs compatíveis com as características técnicas informadas pela área demandante.
+
+### 3. CATMATs considerados na pesquisa
+
+Foram considerados os seguintes códigos CATMAT:
+
+{", ".join([str(c) for c in catmats])}
+
+A utilização de múltiplos CATMATs é necessária porque o objeto descrito de forma genérica pode possuir variações técnicas relevantes, tais como características de desempenho, composição, capacidade, garantia, materiais ou demais atributos específicos do PDM.
+
+### 4. Evidências preliminares de mercado
+
+A pesquisa de preços foi realizada no período de **{periodo.get("data_inicial")}** a **{periodo.get("data_final")}**, com base em registros públicos do Compras.gov.br.
+
+Foram obtidos **{resumo.get("registros_de_preco")} registros de preços** relacionados aos CATMATs selecionados.
+
+Resumo estatístico preliminar:
+
+- Registros com preço válido: **{estat.get("registros_com_preco")}**
+- Menor preço unitário: **{estat.get("menor_preco")}**
+- Maior preço unitário: **{estat.get("maior_preco")}**
+- Preço médio: **{estat.get("preco_medio")}**
+- Mediana: **{estat.get("mediana")}**
+
+Para fins de planejamento preliminar, recomenda-se cautela na utilização da média, pois ela pode ser afetada por valores extremos. A mediana tende a ser referência mais robusta quando há dispersão significativa de preços.
+
+### 5. Observação metodológica
+
+A pesquisa inicial indica que o objeto não deve ser tratado apenas por sua denominação genérica. A seleção dos CATMATs deve observar a compatibilidade técnica entre os itens pesquisados e a necessidade efetiva da contratação, evitando comparação indevida entre itens de especificações distintas.
+
+### 6. Encaminhamento
+
+Recomenda-se o prosseguimento da demanda para elaboração do Estudo Técnico, com refinamento das características técnicas, saneamento da pesquisa de preços, análise de outliers, validação da quantidade e definição da estratégia de contratação.
+"""
+
+    return texto.strip()
+
 
 # ============================================================
-# INTERFACE PRINCIPAL
+# INTERFACE
 # ============================================================
 
-aba_dinamica, aba_direta = st.tabs([
-    "Busca dinâmica por PDM e características",
+aba_principal, aba_direta = st.tabs([
+    "Demanda → PDM manual → filtros → preços → DOD",
     "Consulta direta por CATMAT"
 ])
 
 
 # ============================================================
-# ABA 1 - BUSCA DINÂMICA
+# ABA PRINCIPAL
 # ============================================================
 
-with aba_dinamica:
-    st.header("1. Buscar família/PDM do objeto")
+with aba_principal:
+    st.header("1. Descrever demanda")
 
-    col_busca_1, col_busca_2 = st.columns([2, 1])
+    demanda_texto = st.text_area(
+        "Descreva a demanda",
+        value=(
+            "Precisamos comprar 500 notebooks corporativos com tela de 16 polegadas, "
+            "32 GB de RAM, SSD NVMe de 512 GB, Wi-Fi 6, TPM 2.0 e garantia on site de 60 meses."
+        ),
+        height=120
+    )
 
-    with col_busca_1:
-        termo_busca = st.text_input(
-            "Digite o objeto ou família de material",
-            value="notebook",
-            help="Exemplos: notebook, monitor, teclado, mouse, cadeira, switch"
-        )
+    col_demanda_1, col_demanda_2, col_demanda_3 = st.columns(3)
 
-    with col_busca_2:
-        max_paginas_pdm = st.number_input(
-            "Máximo de páginas de PDM",
+    with col_demanda_1:
+        quantidade = st.number_input(
+            "Quantidade estimada",
             min_value=1,
-            max_value=200,
-            value=160,
-            step=10,
-            key="max_paginas_pdm"
+            value=500,
+            step=1
         )
 
-    if st.button("Carregar e buscar PDMs ativos"):
-        with st.spinner("Carregando PDMs ativos do Compras.gov.br..."):
-            df_pdms, erros_pdm, total_pdm, paginas_pdm, urls_pdm = carregar_pdms_ativos(
-                max_paginas=int(max_paginas_pdm)
+    with col_demanda_2:
+        codigo_pdm = st.number_input(
+            "Código PDM",
+            min_value=1,
+            value=8435,
+            step=1
+        )
+
+    with col_demanda_3:
+        nome_pdm_informado = st.text_input(
+            "Nome do PDM, opcional",
+            value="Notebook"
+        )
+
+    st.caption(
+        "Nesta versão, o PDM é informado manualmente. Exemplo: Notebook = 8435; Tesoura = 249."
+    )
+
+    st.header("2. Carregar CATMATs do PDM")
+
+    col_catmat_1, col_catmat_2, col_catmat_3 = st.columns(3)
+
+    with col_catmat_1:
+        somente_ativos = st.checkbox("Somente CATMATs ativos", value=True)
+
+    with col_catmat_2:
+        max_paginas_catmat = st.number_input(
+            "Máximo de páginas de CATMAT",
+            min_value=1,
+            max_value=30,
+            value=10,
+            step=1
+        )
+
+    with col_catmat_3:
+        tamanho_pagina_catmat = st.number_input(
+            "Registros por página no CATMAT",
+            min_value=10,
+            max_value=200,
+            value=100,
+            step=10
+        )
+
+    if st.button("Carregar CATMATs do PDM"):
+        limpar_session_state_catmat()
+
+        with st.spinner("Consultando CATMATs do PDM informado..."):
+            df_itens, erros_itens, total_itens, paginas_itens, urls_itens = carregar_itens_por_pdm(
+                codigo_pdm=int(codigo_pdm),
+                somente_ativos=somente_ativos,
+                max_paginas=int(max_paginas_catmat),
+                tamanho_pagina=int(tamanho_pagina_catmat)
             )
 
-        st.session_state["df_pdms"] = df_pdms
-        st.session_state["erros_pdm"] = erros_pdm
-        st.session_state["total_pdm"] = total_pdm
-        st.session_state["paginas_pdm"] = paginas_pdm
-        st.session_state["urls_pdm"] = urls_pdm
+        df_itens_carac = criar_tabela_caracteristicas(df_itens)
 
-        # Limpa resultados dependentes de busca anterior
-        for chave in [
-            "df_itens_carac",
-            "resultados_precos",
-            "erros_precos",
-            "urls_precos",
-            "codigo_pdm_atual"
-        ]:
-            st.session_state.pop(chave, None)
-
-    if "df_pdms" not in st.session_state:
-        st.info("Clique em 'Carregar e buscar PDMs ativos' para iniciar.")
-    else:
-        df_pdms = st.session_state["df_pdms"]
-        erros_pdm = st.session_state.get("erros_pdm", [])
-        total_pdm = st.session_state.get("total_pdm")
-        paginas_pdm = st.session_state.get("paginas_pdm")
-        urls_pdm = st.session_state.get("urls_pdm", [])
-
-        st.subheader("PDMs carregados")
-
-        st.write("Total de registros informado pela API:", total_pdm)
-        st.write("Total de páginas informado pela API:", paginas_pdm)
-        st.write("Registros carregados no app:", len(df_pdms))
-
-        with st.expander("Diagnóstico da consulta de PDM"):
-            st.write("Colunas retornadas pela API:")
-            st.write(list(df_pdms.columns))
-            st.write("URLs consultadas:")
-            st.write(urls_pdm)
-
-            if not df_pdms.empty:
-                st.dataframe(df_pdms.head(20), use_container_width=True)
-
-        if erros_pdm:
-            st.warning("A consulta de PDM retornou erro em uma das páginas.")
-            st.json(erros_pdm)
-
-        df_pdm_filtrado = buscar_em_colunas_textuais(df_pdms, termo_busca)
-
-        st.write("PDMs encontrados para o termo:", len(df_pdm_filtrado))
-
-        if df_pdm_filtrado.empty:
-            st.warning("Nenhum PDM encontrado para o termo informado.")
-        else:
-            codigo_pdm_col = primeira_coluna_existente(
-                df_pdm_filtrado,
-                ["codigoPdm", "codigo_pdm", "codPdm", "idPdm"]
-            )
-
-            nome_pdm_col = primeira_coluna_existente(
-                df_pdm_filtrado,
-                ["nomePdm", "nome_pdm", "descricaoPdm", "descricao"]
-            )
-
-            codigo_classe_col = primeira_coluna_existente(
-                df_pdm_filtrado,
-                ["codigoClasse", "codigo_classe", "codClasse"]
-            )
-
-            nome_classe_col = primeira_coluna_existente(
-                df_pdm_filtrado,
-                ["nomeClasse", "nome_classe"]
-            )
-
-            colunas_pdm_preferidas = [
-                "codigoPdm",
-                "nomePdm",
-                "codigoClasse",
-                "nomeClasse",
-                "codigoGrupo",
-                "nomeGrupo",
-                "statusPdm"
-            ]
-
-            colunas_pdm_existentes = [
-                c for c in colunas_pdm_preferidas if c in df_pdm_filtrado.columns
-            ]
-
-            if colunas_pdm_existentes:
-                st.dataframe(
-                    df_pdm_filtrado[colunas_pdm_existentes].head(200),
-                    use_container_width=True
-                )
-            else:
-                st.dataframe(
-                    df_pdm_filtrado.head(200),
-                    use_container_width=True
-                )
-
-            if codigo_pdm_col is None:
-                st.error(
-                    "Não foi possível identificar a coluna de código do PDM no retorno da API. "
-                    "Abra o diagnóstico acima e verifique os nomes das colunas retornadas."
-                )
-            else:
-                opcoes_pdm = []
-
-                for _, row in df_pdm_filtrado.iterrows():
-                    codigo_pdm_valor = row.get(codigo_pdm_col)
-                    nome_pdm_valor = row.get(nome_pdm_col, "") if nome_pdm_col else ""
-                    codigo_classe_valor = row.get(codigo_classe_col, "") if codigo_classe_col else ""
-                    nome_classe_valor = row.get(nome_classe_col, "") if nome_classe_col else ""
-
-                    label = (
-                        f"{int(codigo_pdm_valor)} - {nome_pdm_valor} "
-                        f"| Classe {codigo_classe_valor} - {nome_classe_valor}"
-                    )
-
-                    opcoes_pdm.append(label)
-
-                pdm_selecionado_label = st.selectbox(
-                    "Selecione o PDM",
-                    options=opcoes_pdm,
-                    key="pdm_selecionado_label"
-                )
-
-                codigo_pdm = int(pdm_selecionado_label.split(" - ")[0])
-
-                st.header("2. Carregar CATMATs do PDM selecionado")
-
-                col_item_1, col_item_2, col_item_3 = st.columns(3)
-
-                with col_item_1:
-                    somente_ativos = st.checkbox(
-                        "Somente itens ativos",
-                        value=True,
-                        key="somente_ativos_itens"
-                    )
-
-                with col_item_2:
-                    max_paginas_itens = st.number_input(
-                        "Máximo de páginas de CATMAT",
-                        min_value=1,
-                        max_value=50,
-                        value=20,
-                        step=1,
-                        key="max_paginas_itens"
-                    )
-
-                with col_item_3:
-                    max_catmats_default = st.number_input(
-                        "Máximo de CATMATs pré-selecionados",
-                        min_value=1,
-                        max_value=50,
-                        value=10,
-                        step=1,
-                        key="max_catmats_default"
-                    )
-
-                if st.button("Carregar CATMATs deste PDM"):
-                    with st.spinner("Consultando itens CATMAT do PDM selecionado..."):
-                        df_itens, erros_itens, total_itens, paginas_itens, urls_itens = carregar_itens_por_pdm(
-                            codigo_pdm=codigo_pdm,
-                            somente_ativos=somente_ativos,
-                            max_paginas=int(max_paginas_itens)
-                        )
-
-                    df_itens_carac = criar_tabela_caracteristicas(df_itens)
-
-                    st.session_state["codigo_pdm_atual"] = codigo_pdm
-                    st.session_state["df_itens_carac"] = df_itens_carac
-                    st.session_state["erros_itens"] = erros_itens
-                    st.session_state["total_itens"] = total_itens
-                    st.session_state["paginas_itens"] = paginas_itens
-                    st.session_state["urls_itens"] = urls_itens
-
-                    for chave in [
-                        "resultados_precos",
-                        "erros_precos",
-                        "urls_precos"
-                    ]:
-                        st.session_state.pop(chave, None)
+        st.session_state["demanda_texto"] = demanda_texto
+        st.session_state["quantidade"] = int(quantidade)
+        st.session_state["codigo_pdm_atual"] = int(codigo_pdm)
+        st.session_state["nome_pdm_atual"] = nome_pdm_informado
+        st.session_state["df_itens_carac"] = df_itens_carac
+        st.session_state["erros_itens"] = erros_itens
+        st.session_state["total_itens"] = total_itens
+        st.session_state["paginas_itens"] = paginas_itens
+        st.session_state["urls_itens"] = urls_itens
 
     if "df_itens_carac" in st.session_state:
         df_itens_carac = st.session_state["df_itens_carac"]
@@ -647,7 +681,7 @@ with aba_dinamica:
         paginas_itens = st.session_state.get("paginas_itens")
         urls_itens = st.session_state.get("urls_itens", [])
 
-        st.header("3. Filtros dinâmicos de características")
+        st.header("3. Filtros dinâmicos por características do PDM")
 
         st.write("Total de CATMATs informado pela API:", total_itens)
         st.write("Total de páginas informado pela API:", paginas_itens)
@@ -663,17 +697,17 @@ with aba_dinamica:
                 st.dataframe(df_itens_carac.head(20), use_container_width=True)
 
         if erros_itens:
-            st.warning("A consulta de CATMAT retornou erro em uma das páginas.")
+            st.warning("A consulta de CATMAT retornou erro em uma ou mais páginas.")
             st.json(erros_itens)
 
         if df_itens_carac.empty:
-            st.warning("Nenhum CATMAT retornado para o PDM selecionado.")
+            st.warning("Nenhum CATMAT retornado para o PDM informado.")
         else:
             candidatas = identificar_colunas_caracteristicas(df_itens_carac)
 
             st.caption(
-                "Os filtros abaixo são extraídos automaticamente da descrição dos CATMATs. "
-                "Como a descrição não é uma estrutura perfeita de dados, esta etapa usa heurística textual."
+                "Os filtros abaixo são extraídos automaticamente da descrição dos CATMATs do PDM informado. "
+                "Esta é uma extração textual heurística."
             )
 
             filtros = {}
@@ -683,16 +717,13 @@ with aba_dinamica:
             else:
                 limite_superior = min(20, len(candidatas))
 
-                if limite_superior == 1:
-                    max_filtros = 1
-                else:
-                    max_filtros = st.slider(
-                        "Quantidade máxima de características exibidas",
-                        min_value=1,
-                        max_value=limite_superior,
-                        value=min(10, limite_superior),
-                        key="max_filtros_dinamicos"
-                    )
+                max_filtros = st.slider(
+                    "Quantidade máxima de características exibidas",
+                    min_value=1,
+                    max_value=limite_superior,
+                    value=min(10, limite_superior),
+                    key="max_filtros_dinamicos"
+                )
 
                 cols = st.columns(3)
 
@@ -712,17 +743,17 @@ with aba_dinamica:
 
                     with cols[i % 3]:
                         selecionados = st.multiselect(
-                            nome,
+                            label=f"{nome}",
                             options=valores,
                             default=[],
-                            key=f"filtro_{st.session_state.get('codigo_pdm_atual', 'pdm')}_{coluna}"
+                            key=f"filtro_{st.session_state.get('codigo_pdm_atual')}_{coluna}"
                         )
 
                     filtros[coluna] = selecionados
 
             df_filtrado = aplicar_filtros_dinamicos(df_itens_carac, filtros)
 
-            st.subheader("4. CATMATs candidatos após filtros")
+            st.header("4. CATMATs candidatos após filtros")
             st.write("CATMATs após filtros:", len(df_filtrado))
 
             colunas_base = [
@@ -741,12 +772,12 @@ with aba_dinamica:
 
             if colunas_exibir:
                 st.dataframe(
-                    df_filtrado[colunas_exibir].head(300),
+                    df_filtrado[colunas_exibir].head(500),
                     use_container_width=True
                 )
             else:
                 st.dataframe(
-                    df_filtrado.head(300),
+                    df_filtrado.head(500),
                     use_container_width=True
                 )
 
@@ -758,15 +789,8 @@ with aba_dinamica:
             if df_filtrado.empty:
                 st.warning("Nenhum CATMAT permaneceu após os filtros.")
             elif codigo_item_col is None:
-                st.error(
-                    "Não foi possível identificar a coluna de código CATMAT. "
-                    "Abra o diagnóstico da consulta de CATMAT e verifique os nomes das colunas."
-                )
+                st.error("Não foi possível identificar a coluna de código CATMAT.")
             else:
-                max_catmats_default_valor = int(
-                    st.session_state.get("max_catmats_default", 10)
-                )
-
                 codigos_disponiveis = (
                     df_filtrado[codigo_item_col]
                     .dropna()
@@ -775,7 +799,9 @@ with aba_dinamica:
                     .tolist()
                 )
 
-                codigos_default = codigos_disponiveis[:max_catmats_default_valor]
+                max_default = min(10, len(codigos_disponiveis))
+
+                codigos_default = codigos_disponiveis[:max_default]
 
                 codigos_selecionados = st.multiselect(
                     "Selecione os CATMATs para consulta de preços",
@@ -784,35 +810,47 @@ with aba_dinamica:
                     key="codigos_catmat_selecionados"
                 )
 
-                st.header("5. Consulta de preços dos CATMATs selecionados")
+                st.header("5. Consulta de preços")
 
-                col_data_1, col_data_2, col_data_3 = st.columns(3)
+                col_preco_1, col_preco_2, col_preco_3, col_preco_4 = st.columns(4)
 
-                with col_data_1:
+                with col_preco_1:
                     data_inicial = st.date_input(
                         "Data inicial",
                         value=date(2024, 1, 1),
-                        key="dinamica_data_inicial"
+                        key="data_inicial_precos"
                     )
 
-                with col_data_2:
+                with col_preco_2:
                     data_final = st.date_input(
                         "Data final",
                         value=date.today(),
-                        key="dinamica_data_final"
+                        key="data_final_precos"
                     )
 
-                with col_data_3:
+                with col_preco_3:
                     max_paginas_preco = st.number_input(
                         "Máximo de páginas por CATMAT",
                         min_value=1,
                         max_value=10,
                         value=2,
                         step=1,
-                        key="dinamica_max_paginas_preco"
+                        key="max_paginas_preco"
+                    )
+
+                with col_preco_4:
+                    tamanho_pagina_preco = st.number_input(
+                        "Registros por página em preços",
+                        min_value=10,
+                        max_value=100,
+                        value=50,
+                        step=10,
+                        key="tamanho_pagina_preco"
                     )
 
                 if st.button("Consultar preços dos CATMATs selecionados"):
+                    limpar_session_state_precos()
+
                     if not codigos_selecionados:
                         st.warning("Selecione pelo menos um CATMAT.")
                     else:
@@ -821,21 +859,28 @@ with aba_dinamica:
                                 codigos_catmat=codigos_selecionados,
                                 data_inicial=data_inicial,
                                 data_final=data_final,
-                                max_paginas_por_catmat=int(max_paginas_preco)
+                                max_paginas_por_catmat=int(max_paginas_preco),
+                                tamanho_pagina=int(tamanho_pagina_preco)
                             )
+
+                        df_precos = pd.DataFrame(resultados_precos)
 
                         st.session_state["resultados_precos"] = resultados_precos
                         st.session_state["erros_precos"] = erros_precos
                         st.session_state["urls_precos"] = urls_precos
+                        st.session_state["df_precos"] = df_precos
+                        st.session_state["codigos_catmat_consultados"] = codigos_selecionados
+                        st.session_state["data_inicial_precos_final"] = data_inicial
+                        st.session_state["data_final_precos_final"] = data_final
 
-    if "resultados_precos" in st.session_state:
-        resultados_precos = st.session_state["resultados_precos"]
+    if "df_precos" in st.session_state:
+        df_precos = st.session_state["df_precos"]
         erros_precos = st.session_state.get("erros_precos", [])
         urls_precos = st.session_state.get("urls_precos", [])
 
         st.header("6. Resultados consolidados de preços")
 
-        st.write("Registros de preços carregados:", len(resultados_precos))
+        st.write("Registros de preços carregados:", len(df_precos))
 
         with st.expander("URLs consultadas na pesquisa de preços"):
             st.write(urls_precos)
@@ -844,12 +889,12 @@ with aba_dinamica:
             st.warning("Algumas consultas de preço retornaram erro.")
             st.json(erros_precos)
 
-        if resultados_precos:
-            df_precos = pd.DataFrame(resultados_precos)
-
+        if df_precos.empty:
+            st.warning("Nenhum preço retornado para os CATMATs selecionados.")
+        else:
             st.dataframe(df_precos, use_container_width=True)
 
-            exibir_estatisticas_precos(df_precos)
+            estatisticas = exibir_estatisticas_precos(df_precos)
 
             fornecedor_col = primeira_coluna_existente(
                 df_precos,
@@ -897,7 +942,7 @@ with aba_dinamica:
                     df_precos[colunas_desc]
                     .drop_duplicates()
                 )
-                st.dataframe(descricoes, use_container_width=True)
+                st.dataframe(descricoes.head(100), use_container_width=True)
 
             csv = df_precos.to_csv(index=False).encode("utf-8-sig")
 
@@ -907,8 +952,31 @@ with aba_dinamica:
                 file_name="precos_consolidados_catmat.csv",
                 mime="text/csv"
             )
-        else:
-            st.warning("Nenhum preço retornado para os CATMATs selecionados.")
+
+            st.header("7. Insumos preliminares para DOD")
+
+            resumo = gerar_resumo_dod(
+                demanda_texto=st.session_state.get("demanda_texto", demanda_texto),
+                quantidade=st.session_state.get("quantidade", quantidade),
+                codigo_pdm=st.session_state.get("codigo_pdm_atual", codigo_pdm),
+                nome_pdm=st.session_state.get("nome_pdm_atual", nome_pdm_informado),
+                codigos_catmat=st.session_state.get("codigos_catmat_consultados", []),
+                df_precos=df_precos,
+                estatisticas=estatisticas,
+                data_inicial=st.session_state.get("data_inicial_precos_final", date(2024, 1, 1)),
+                data_final=st.session_state.get("data_final_precos_final", date.today())
+            )
+
+            with st.expander("Resumo estruturado para envio ao ChatGPT"):
+                st.json(resumo)
+
+            texto_dod = gerar_texto_base_dod(resumo)
+
+            st.text_area(
+                "Texto-base preliminar para DOD",
+                value=texto_dod,
+                height=500
+            )
 
 
 # ============================================================
@@ -954,14 +1022,14 @@ with aba_direta:
     col4, col5 = st.columns(2)
 
     with col4:
-        data_inicial = st.date_input(
+        data_inicial_direta = st.date_input(
             "Data inicial",
             value=date(2024, 1, 1),
             key="direto_data_inicial"
         )
 
     with col5:
-        data_final = st.date_input(
+        data_final_direta = st.date_input(
             "Data final",
             value=date.today(),
             key="direto_data_final"
@@ -971,8 +1039,8 @@ with aba_direta:
         try:
             params_base = {
                 "codigoItemCatalogo": int(codigo_item),
-                "dataCompraMin": data_inicial.strftime("%Y-%m-%d"),
-                "dataCompraMax": data_final.strftime("%Y-%m-%d")
+                "dataCompraMin": data_inicial_direta.strftime("%Y-%m-%d"),
+                "dataCompraMax": data_final_direta.strftime("%Y-%m-%d")
             }
 
             with st.spinner("Consultando Pesquisa de Preços..."):
@@ -981,7 +1049,9 @@ with aba_direta:
                     params_base=params_base,
                     tamanho_pagina=int(tamanho_pagina),
                     max_paginas=int(max_paginas),
-                    timeout=120
+                    timeout=120,
+                    tentativas_por_pagina=3,
+                    pular_pagina_com_erro=True
                 )
 
             st.write("Total de registros informado pela API:", total_registros)
@@ -992,7 +1062,7 @@ with aba_direta:
                 st.write(urls)
 
             if erros:
-                st.warning("A consulta retornou erro em uma das páginas.")
+                st.warning("A consulta retornou erro em uma ou mais páginas.")
                 st.json(erros)
 
             if resultados:
