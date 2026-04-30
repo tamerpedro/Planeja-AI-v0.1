@@ -125,12 +125,11 @@ def carregar_pdms_ativos(max_paginas=50):
     df = pd.DataFrame(resultados)
 
     if not df.empty:
-        for coluna in ["nomePdm", "nomeClasse", "nomeGrupo"]:
-            if coluna in df.columns:
+        for coluna in df.columns:
+            if df[coluna].dtype == "object":
                 df[f"{coluna}_norm"] = df[coluna].apply(normalizar_texto)
 
     return df, erros, total_registros, total_paginas, urls
-
 
 @st.cache_data(ttl=1800)
 def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=20):
@@ -375,16 +374,33 @@ with aba_dinamica:
 
         termo_norm = normalizar_texto(termo_busca)
 
-        if termo_norm:
-            mascara = (
-                df_pdms.get("nomePdm_norm", "").astype(str).str.contains(termo_norm, na=False)
-                | df_pdms.get("nomeClasse_norm", "").astype(str).str.contains(termo_norm, na=False)
-                | df_pdms.get("nomeGrupo_norm", "").astype(str).str.contains(termo_norm, na=False)
-            )
-            df_pdm_filtrado = df_pdms[mascara].copy()
-        else:
-            df_pdm_filtrado = df_pdms.copy()
+if termo_norm:
+    mascara = pd.Series(False, index=df_pdms.index)
 
+    colunas_busca = [
+        "nomePdm_norm",
+        "nomeClasse_norm",
+        "nomeGrupo_norm",
+        "nomePdm",
+        "nomeClasse",
+        "nomeGrupo",
+        "descricaoPdm",
+        "descricao"
+    ]
+
+    for coluna in colunas_busca:
+        if coluna in df_pdms.columns:
+            mascara = mascara | (
+                df_pdms[coluna]
+                .fillna("")
+                .astype(str)
+                .apply(normalizar_texto)
+                .str.contains(termo_norm, na=False, regex=False)
+            )
+
+    df_pdm_filtrado = df_pdms[mascara].copy()
+else:
+    df_pdm_filtrado = df_pdms.copy()
         st.write("PDMs carregados:", len(df_pdms))
         st.write("PDMs encontrados para o termo:", len(df_pdm_filtrado))
 
