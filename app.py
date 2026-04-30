@@ -14,19 +14,32 @@ st.divider()
 
 st.subheader("Consulta de item de material - CATMAT")
 
-url = "https://dadosabertos.compras.gov.br/modulo-material/4_consultarItemMaterial"
-
-codigo_item = st.text_input(
-    "Código do item de material",
-    value="461506"
+tipo_consulta = st.radio(
+    "Tipo de consulta",
+    ["Por descrição", "Por código CATMAT"],
+    horizontal=True
 )
 
+url = "https://dadosabertos.compras.gov.br/modulo-material/4_consultarItemMaterial"
+
+if tipo_consulta == "Por descrição":
+    termo = st.text_input("Descrição do item", value="notebook")
+else:
+    codigo_item = st.text_input("Código do item de material", value="450340")
+
 if st.button("Consultar Compras.gov.br"):
-    params = {
-        "pagina": 1,
-        "tamanhoPagina": 10,
-        "codigoItem": int(codigo_item)
-    }
+    if tipo_consulta == "Por descrição":
+        params = {
+            "pagina": 1,
+            "tamanhoPagina": 20,
+            "descricaoItem": termo
+        }
+    else:
+        params = {
+            "pagina": 1,
+            "tamanhoPagina": 10,
+            "codigoItem": int(codigo_item)
+        }
 
     try:
         response = requests.get(
@@ -41,15 +54,38 @@ if st.button("Consultar Compras.gov.br"):
 
         if response.status_code == 200:
             data = response.json()
-
-            st.subheader("Retorno bruto da API")
-            st.json(data)
-
             resultado = data.get("resultado", [])
 
+            st.write("Total de registros:", data.get("totalRegistros"))
+            st.write("Total de páginas:", data.get("totalPaginas"))
+
             if resultado:
+                df = pd.DataFrame(resultado)
+
+                colunas_exibir = [
+                    "codigoItem",
+                    "nomeGrupo",
+                    "nomeClasse",
+                    "nomePdm",
+                    "descricaoItem",
+                    "statusItem",
+                    "itemSustentavel",
+                    "dataHoraAtualizacao"
+                ]
+
+                colunas_existentes = [
+                    coluna for coluna in colunas_exibir if coluna in df.columns
+                ]
+
                 st.subheader("Resultado em tabela")
-                st.dataframe(pd.DataFrame(resultado), use_container_width=True)
+                st.dataframe(
+                    df[colunas_existentes],
+                    use_container_width=True
+                )
+
+                with st.expander("Ver retorno bruto da API"):
+                    st.json(data)
+
             else:
                 st.warning("A API respondeu, mas não retornou registros.")
 
