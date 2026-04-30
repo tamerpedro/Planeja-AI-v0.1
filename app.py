@@ -121,7 +121,14 @@ def consultar_endpoint(endpoint, params=None, timeout=120):
 
     return response
 
-def consultar_paginas(endpoint, params_base, tamanho_pagina=500, max_paginas=20, timeout=120):
+def consultar_paginas(
+    endpoint,
+    params_base,
+    tamanho_pagina=100,
+    max_paginas=200,
+    timeout=120,
+    tentativas_por_pagina=3
+):
     resultados = []
     erros = []
     urls_consultadas = []
@@ -133,83 +140,89 @@ def consultar_paginas(endpoint, params_base, tamanho_pagina=500, max_paginas=20,
         params["pagina"] = pagina
         params["tamanhoPagina"] = tamanho_pagina
 
-        try:
-            response = consultar_endpoint(
-                endpoint=endpoint,
-                params=params,
-                timeout=timeout
-            )
+        sucesso_pagina = False
 
-            urls_consultadas.append(response.url)
+        for tentativa in range(1, tentativas_por_pagina + 1):
+            try:
+                response = consultar_endpoint(
+                    endpoint=endpoint,
+                    params=params,
+                    timeout=timeout
+                )
 
-            if response.status_code != 200:
-                erros.append({
+                urls_consultadas.append(response.url)
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    if total_registros is None:
+                        total_registros = data.get("totalRegistros")
+                        total_paginas = data.get("totalPaginas")
+
+                    pagina_resultados = data.get("resultado", [])
+
+                    if not pagina_resultados:
+                        return resultados, erros, total_registros, total_paginas, urls_consultadas
+
+                    resultados.extend(pagina_resultados)
+                    sucesso_pagina = True
+
+                    break
+
+                else:
+                    erro_atual = {
+                        "pagina": pagina,
+                        "tentativa": tentativa,
+                        "status": response.status_code,
+                        "mensagem": response.text,
+                        "url": response.url
+                    }
+
+                    time.sleep(1.0 * tentativa)
+
+            except Exception as e:
+                erro_atual = {
                     "pagina": pagina,
-                    "status": response.status_code,
-                    "mensagem": response.text,
-                    "url": response.url
-                })
-                break
+                    "tentativa": tentativa,
+                    "status": "erro",
+                    "mensagem": str(e)
+                }
 
-            data = response.json()
+                time.sleep(1.0 * tentativa)
 
-            if total_registros is None:
-                total_registros = data.get("totalRegistros")
-                total_paginas = data.get("totalPaginas")
+        if not sucesso_pagina:
+            erros.append(erro_atual)
+            continue
 
-            pagina_resultados = data.get("resultado", [])
+        try:
+            total_registros_int = int(total_registros) if total_registros is not None else 0
+        except Exception:
+            total_registros_int = 0
 
-            # Critério mais confiável: página vazia encerra a busca
-            if not pagina_resultados:
-                break
-
-            resultados.extend(pagina_resultados)
-
-            # Só confia em totalPaginas se vier um número válido maior que zero
-            try:
-                total_paginas_int = int(total_paginas) if total_paginas is not None else 0
-            except Exception:
-                total_paginas_int = 0
-
-            if total_paginas_int > 0 and pagina >= total_paginas_int:
-                break
-
-            # Se já carregou todos os registros informados, pode parar
-            try:
-                total_registros_int = int(total_registros) if total_registros is not None else 0
-            except Exception:
-                total_registros_int = 0
-
-            if total_registros_int > 0 and len(resultados) >= total_registros_int:
-                break
-
-            time.sleep(0.25)
-
-        except Exception as e:
-            erros.append({
-                "pagina": pagina,
-                "status": "erro",
-                "mensagem": str(e)
-            })
+        if total_registros_int > 0 and len(resultados) >= total_registros_int:
             break
+
+        time.sleep(0.25)
 
     return resultados, erros, total_registros, total_paginas, urls_consultadas
 
 @st.cache_data(ttl=3600)
-def carregar_pdms_ativos(max_paginas=50):
+def carregar_pdms_ativos(max_paginas=160):
     resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
         endpoint="/modulo-material/3_consultarPdmMaterial",
-        params_base={"statusPdm": True},
-        tamanho_pagina=500,
+        params_base={
+            "statusPdm": True
+        },
+        tamanho_pagina=100,
         max_paginas=max_paginas,
-        timeout=120
+        timeout=120,
+        tentativas_por_pagina=3
     )
 
     df = pd.DataFrame(resultados)
     df = criar_colunas_normalizadas(df)
 
     return df, erros, total_registros, total_paginas, urls
-
 
 @st.cache_data(ttl=1800)
 def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=20):
@@ -435,9 +448,9 @@ with aba_dinamica:
         max_paginas_pdm = st.number_input(
             "Máximo de páginas de PDM",
             min_value=1,
-            max_value=100,
-            value=50,
-            step=5,
+            max_value=200,
+            value=160,
+            step=10,
             key="max_paginas_pdm"
         )
 
