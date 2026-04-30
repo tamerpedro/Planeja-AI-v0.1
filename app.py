@@ -195,85 +195,96 @@ def consultar_paginas(
     return resultados, erros, total_registros, total_paginas, urls_consultadas
 
 
-@st.cache_data(ttl=1800)
-def carregar_itens_por_pdm(codigo_pdm, somente_ativos=True, max_paginas=10, tamanho_pagina=50):
+@st.cache_data(ttl=1800, show_spinner=False)
+def carregar_itens_por_pdm(
+    codigo_pdm,
+    somente_ativos=True,
+    max_paginas=10,
+    tamanho_pagina=50
+):
     """
-    Consulta CATMATs por PDM.
+    Consulta CATMATs por PDM com estratégia defensiva.
 
     Estratégia:
-    1. Não envia statusItem=True para evitar erro 400 em alguns PDMs.
-    2. Filtra itens ativos localmente, se a coluna statusItem vier no retorno.
-    3. Usa tamanho de página menor para reduzir instabilidade da API.
+    1. Tenta primeiro com os parâmetros informados pelo usuário.
+    2. Se a API retornar erro e nenhum resultado, reduz tamanhoPagina.
+    3. Se ainda assim falhar, retorna diagnóstico sem afirmar que o PDM não possui CATMAT.
+    4. Filtra ativos localmente apenas quando a coluna statusItem existir e tiver formato reconhecível.
     """
 
     params = {
         "codigoPdm": int(codigo_pdm)
     }
 
-    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
-        endpoint="/modulo-material/4_consultarItemMaterial",
-        params_base=params,
-        tamanho_pagina=int(tamanho_pagina),
-        max_paginas=int(max_paginas),
-        timeout=120,
-        tentativas_por_pagina=3,
-        pular_pagina_com_erro=True
-    )
+    tamanhos_tentativa = []
 
-    df = pd.DataFrame(resultados)
+    for t in [int(tamanho_pagina), 25, 10, 5]:
+        if t not in tamanhos_tentativa and t > 0:
+            tamanhos_tentativa.append(t)
 
-    if somente_ativos and not df.empty and "statusItem" in df.columns:
-        df = df[df["statusItem"] == True].copy()
-
-    return df, erros, total_registros, total_paginas, urls
-
-
-def consultar_precos_multiplos_catmats(
-    codigos_catmat,
-    data_inicial,
-    data_final,
-    max_paginas_por_catmat=2,
-    tamanho_pagina=50
-):
-    todos_resultados = []
+    melhor_df = pd.DataFrame()
     todos_erros = []
-    urls = []
+    todas_urls = []
+    melhor_total_registros = None
+    melhor_total_paginas = None
+    consulta_teve_erro = False
+    consulta_teve_sucesso = False
 
-    total = len(codigos_catmat)
-
-    if total == 0:
-        return todos_resultados, todos_erros, urls
-
-    progresso = st.progress(0)
-
-    for i, codigo in enumerate(codigos_catmat):
-        params_base = {
-            "codigoItemCatalogo": int(codigo),
-            "dataCompraMin": data_inicial.strftime("%Y-%m-%d"),
-            "dataCompraMax": data_final.strftime("%Y-%m-%d")
-        }
-
-        resultados, erros, _, _, urls_consultadas = consultar_paginas(
-            endpoint="/modulo-pesquisa-preco/1_consultarMaterial",
-            params_base=params_base,
-            tamanho_pagina=tamanho_pagina,
-            max_paginas=max_paginas_por_catmat,
-            timeout=120,
-            tentativas_por_pagina=3,
+    for tamanho in tamanhos_tentativa:
+        resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
+            endpoint="/modulo-material/4_consultarItemMaterial",
+            params_base=params,
+            tamanho_pagina=tamanho,
+            max_paginas=int(max_paginas),
+            timeout=60,
+            tentativas_por_pagina=2,
             pular_pagina_com_erro=True
         )
 
-        for item in resultados:
-            item["catmat_consultado"] = int(codigo)
-
-        todos_resultados.extend(resultados)
         todos_erros.extend(erros)
-        urls.extend(urls_consultadas)
+        todas_urls.extend(urls)
 
-        progresso.progress((i + 1) / total)
-        time.sleep(0.2)
+        if total_registros is not None:
+            melhor_total_registros = total_registros
 
-    return todos_resultados, todos_erros, urls
+        if total_paginas is not None:
+            melhor_total_paginas = total_paginas
+
+        if erros:
+            consulta_teve_erro = True
+
+        if resultados:
+            consulta_teve_sucesso = True
+            melhor_df = pd.DataFrame(resultados)
+            break
+
+        time.sleep(0.5)
+
+    df = melhor_df.copy()
+
+    if somente_ativos and not df.empty and "statusItem" in df.columns:
+        serie_status = df["statusItem"]
+
+        if serie_status.dtype == bool:
+            df = df[df["statusItem"] == True].copy()
+        else:
+            status_norm = serie_status.astype(str).apply(normalizar_texto)
+            df = df[
+                status_norm.isin(["TRUE", "1", "ATIVO", "SIM", "S"])
+            ].copy()
+
+    diagnostico = {
+        "consulta_teve_sucesso": consulta_teve_sucesso,
+        "consulta_teve_erro": consulta_teve_erro,
+        "tentativas_tamanho_pagina": tamanhos_tentativa,
+        "total_registros_api": melhor_total_registros,
+        "total_paginas_api": melhor_total_paginas,
+        "quantidade_carregada": int(len(df)),
+        "erros": todos_erros,
+        "urls": todas_urls
+    }
+
+    return df, todos_erros, melhor_total_registros, melhor_total_paginas, todas_urls, diagnostico
 
 
 # ============================================================
@@ -647,17 +658,17 @@ with aba_principal:
             "Máximo de páginas de CATMAT",
             min_value=1,
             max_value=30,
-            value=10,
+            value=5,
             step=1
         )
 
     with col_catmat_3:
         tamanho_pagina_catmat = st.number_input(
             "Registros por página no CATMAT",
-            min_value=10,
-            max_value=100,
-            value=50,
-            step=10
+            min_value=5,
+            max_value=50,
+            value=10,
+            step=5
         )
 
     if st.button("Carregar CATMATs do PDM"):
