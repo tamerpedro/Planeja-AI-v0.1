@@ -1,3 +1,4 @@
+# Teste de sincronização GitHub: comentário temporário no cabeçalho do app.
 import re
 import time
 import unicodedata
@@ -21,7 +22,7 @@ BASE_URL = "https://dadosabertos.compras.gov.br"
 
 st.title("PlanejaIA - Protótipo inicial")
 st.write(
-    "PDM manual, filtros dinâmicos extraídos dos CATMATs e consulta de preços no Compras.gov.br."
+    "Da descrição de itens até CATMAT, preços públicos e minuta semiestruturada de DOD Dataprev."
 )
 
 st.divider()
@@ -608,7 +609,7 @@ def gerar_resumo_dod(
     return resumo
 
 
-def gerar_texto_base_dod(resumo):
+def gerar_texto_base_dod_dataprev(resumo, metadados_dod):
     demanda = resumo.get("demanda", "")
     quantidade = resumo.get("quantidade_estimada", "")
     codigo_pdm = resumo.get("codigo_pdm", "")
@@ -617,56 +618,104 @@ def gerar_texto_base_dod(resumo):
     estat = resumo.get("estatisticas", {})
     periodo = resumo.get("periodo_pesquisa", {})
 
+    motivacao = metadados_dod.get("motivacao", "Nova contratação")
+    riscos = metadados_dod.get("riscos", "Descontinuidade operacional, atraso na entrega de serviços e aumento de custos por aquisição emergencial.")
+    resultados = metadados_dod.get("resultados", "Padronização do objeto, contratação tempestiva e melhoria da eficiência operacional.")
+    data_prevista = metadados_dod.get("data_prevista", "A definir")
+    fornecedores = metadados_dod.get("fornecedores", "Sem fornecedor previamente definido")
+    areas_internas = metadados_dod.get("areas_internas", "Área demandante; área de contratações; área técnica")
+    clientes_externos = metadados_dod.get("clientes_externos", "Não se aplica")
+    info_adicionais = metadados_dod.get("informacoes_adicionais", "Pesquisa baseada em dados abertos do Compras.gov.br.")
+    notas = metadados_dod.get("notas", "Documento preliminar para refinamento em ETP/TR.")
+    anexos = metadados_dod.get("anexos", "Anexar planilha de preços e memória de cálculo.")
+
+    itens_descritos = resumo.get("descricoes_de_itens_encontradas", [])
+    itens_preview = "\n".join([f"- {d}" for d in itens_descritos[:10]]) if itens_descritos else "- Item detalhado na demanda textual."
+
+    opcoes = [
+        "( ) Atendimento de obrigação legal/regulatória",
+        "( ) Continuidade de contrato existente",
+        "(X) Nova contratação",
+        "( ) Expansão/evolução de solução existente"
+    ]
+
     texto = f"""
-## Minuta preliminar de insumos para DOD
+# Documento de Oficialização da Demanda (DOD) - Dataprev (minuta semiestruturada)
 
-### 1. Descrição da demanda
+## 2.1. CONTEXTO DE NEGÓCIO
+A demanda atende ao planejamento da área requisitante para viabilizar aquisição/contratação aderente ao PDM {codigo_pdm} - {nome_pdm}, com base em evidências de compras públicas e rastreabilidade dos CATMATs selecionados.
 
-A presente demanda trata da necessidade de contratação relacionada ao seguinte objeto:
+## 3. CONTEXTO DA DEMANDA
 
-**{demanda}**
+### 3.1. SITUAÇÃO ATUAL
+Processo atual com classificação manual de PDM/CATMAT, maior tempo de ciclo e baixa padronização da justificativa técnica.
 
-A quantidade preliminar estimada é de **{quantidade} unidade(s)**.
+### 3.2. ESCOPO DA DEMANDA
+Demanda registrada: **{demanda}**.
+Quantidade estimada: **{quantidade}**.
 
-### 2. Normalização preliminar do objeto
+### 3.3. MOTIVAÇÃO DA DEMANDA
 
-Para fins de pesquisa inicial no Catálogo de Materiais do Compras.gov.br, foi utilizado o seguinte PDM:
+#### 3.3.1. Assinalar com um X a opção que se enquadra na motivação da demanda:
+{chr(10).join(opcoes)}
+Motivação detalhada informada: {motivacao}.
 
-- **PDM:** {codigo_pdm} - {nome_pdm}
+#### 3.3.2. Descrever os riscos envolvidos, caso a contratação não seja realizada.
+{riscos}
 
-A partir desse PDM, foram identificados e filtrados CATMATs compatíveis com as características técnicas informadas pela área demandante.
+#### 3.3.3. Descrever os resultados a serem alcançados com a contratação.
+{resultados}
 
-### 3. CATMATs considerados na pesquisa
+### 3.4. DATA PREVISTA PARA DISPONIBILIZAÇÃO DA DEMANDA
+{data_prevista}
 
-Foram considerados os seguintes códigos CATMAT:
+### 3.5. FORNECEDOR(ES) (SE HOUVER)
+{fornecedores}
 
-{", ".join([str(c) for c in catmats])}
+### 3.6. DESCRIÇÃO DOS OBJETOS E QUANTIDADES ENVOLVIDAS
 
-A utilização de múltiplos CATMATs é necessária porque o objeto descrito de forma genérica pode possuir variações técnicas relevantes, tais como características de desempenho, composição, capacidade, garantia, materiais ou demais atributos específicos do PDM.
+#### 3.6.1. Para contratos EXISTENTES:
+Não se aplica nesta minuta preliminar (validar com área gestora do contrato, se houver).
 
-### 4. Evidências preliminares de mercado
-
-A pesquisa de preços foi realizada no período de **{periodo.get("data_inicial")}** a **{periodo.get("data_final")}**, com base em registros públicos do Compras.gov.br.
-
-Foram obtidos **{resumo.get("registros_de_preco")} registros de preços** relacionados aos CATMATs selecionados.
-
-Resumo estatístico preliminar:
-
+#### 3.6.2. Para NOVA contratação:
+- PDM de referência: **{codigo_pdm} - {nome_pdm}**
+- CATMATs considerados: **{", ".join([str(c) for c in catmats]) if catmats else "A definir"}**
+- Itens observados na base pública:
+{itens_preview}
+- Período de pesquisa de preços: **{periodo.get("data_inicial")} a {periodo.get("data_final")}**
 - Registros com preço válido: **{estat.get("registros_com_preco")}**
-- Menor preço unitário: **{estat.get("menor_preco")}**
-- Maior preço unitário: **{estat.get("maior_preco")}**
-- Preço médio: **{estat.get("preco_medio")}**
-- Mediana: **{estat.get("mediana")}**
+- Mediana preliminar: **{estat.get("mediana")}**
 
-Para fins de planejamento preliminar, recomenda-se cautela na utilização da média, pois ela pode ser afetada por valores extremos. A mediana tende a ser referência mais robusta quando há dispersão significativa de preços.
+### 3.7. SERVIÇOS ASSOCIADOS A DEMANDA:
+Marcar os serviços aplicáveis no refinamento do ETP/TR.
 
-### 5. Observação metodológica
+#### 3.7.2. Para cada serviço, selecionado no item anterior, descrever as condições mínimas obrigatórias:
 
-A pesquisa inicial indica que o objeto não deve ser tratado apenas por sua denominação genérica. A seleção dos CATMATs deve observar a compatibilidade técnica entre os itens pesquisados e a necessidade efetiva da contratação, evitando comparação indevida entre itens de especificações distintas.
+##### 3.7.2.1. Orientação Técnica
+Caso aplicável, prever orientação para especificação, implantação e boas práticas de uso do objeto contratado.
 
-### 6. Encaminhamento
+##### 3.7.2.2. Capacitação Técnica
+Caso aplicável, prever capacitação de usuários/gestores, com carga horária, público-alvo e material didático.
 
-Recomenda-se o prosseguimento da demanda para elaboração do Estudo Técnico, com refinamento das características técnicas, saneamento da pesquisa de preços, análise de outliers, validação da quantidade e definição da estratégia de contratação.
+##### 3.7.2.3. Suporte Técnico
+Caso aplicável, prever níveis de serviço (SLA), canais de atendimento e janelas de suporte.
+
+## 4. ÁREAS E PAPÉIS ENVOLVIDOS
+
+### 4.1. ÁREAS INTERNAS (DATAPREV)
+{areas_internas}
+
+### 4.2. CLIENTES EXTERNOS QUE FARÃO USO DA SOLUÇÃO/SOFTWARE (OU SERÃO BENEFICIADOS DIRETAMENTE)
+{clientes_externos}
+
+## 5. INFORMAÇÕES ADICIONAIS
+{info_adicionais}
+
+## 6. NOTAS
+{notas}
+
+## 7. ANEXOS
+{anexos}
 """
 
     return texto.strip()
@@ -1099,7 +1148,32 @@ with aba_principal:
             with st.expander("Resumo estruturado para envio ao ChatGPT"):
                 st.json(resumo)
 
-            texto_dod = gerar_texto_base_dod(resumo)
+            st.subheader("Parâmetros de preenchimento do DOD Dataprev")
+            col_dod_1, col_dod_2 = st.columns(2)
+            with col_dod_1:
+                motivacao_dod = st.text_input("Motivação detalhada", value="Nova contratação para atendimento da demanda.")
+                riscos_dod = st.text_area("Riscos se não contratar", value="Interrupção ou degradação dos serviços e aumento de risco operacional.", height=100)
+                resultados_dod = st.text_area("Resultados esperados", value="Melhorar eficiência e garantir continuidade operacional com objeto padronizado.", height=100)
+                data_prevista_dod = st.date_input("Data prevista para disponibilização")
+            with col_dod_2:
+                fornecedores_dod = st.text_area("Fornecedor(es), se houver", value="A definir após fase de seleção.", height=80)
+                areas_dod = st.text_area("Áreas internas Dataprev", value="Área demandante; área técnica; área de contratações.", height=80)
+                clientes_dod = st.text_area("Clientes externos beneficiados", value="Unidades usuárias do serviço/solução.", height=80)
+                infos_dod = st.text_area("Informações adicionais", value="Pesquisa baseada em dados abertos de compras públicas.", height=80)
+            metadados_dod = {
+                "motivacao": motivacao_dod,
+                "riscos": riscos_dod,
+                "resultados": resultados_dod,
+                "data_prevista": data_prevista_dod.strftime("%Y-%m-%d"),
+                "fornecedores": fornecedores_dod,
+                "areas_internas": areas_dod,
+                "clientes_externos": clientes_dod,
+                "informacoes_adicionais": infos_dod,
+                "notas": "Minuta semiestruturada gerada automaticamente para revisão da área técnica e de contratações.",
+                "anexos": "1) Planilha de preços consolidados; 2) Lista de CATMATs selecionados; 3) Evidências de pesquisa no Compras.gov.br."
+            }
+
+            texto_dod = gerar_texto_base_dod_dataprev(resumo, metadados_dod)
 
             st.text_area(
                 "Texto-base preliminar para DOD",
