@@ -98,6 +98,22 @@ def extrair_tokens_busca(termo):
     ]
 
 
+def parsear_codigos_catalogo(texto):
+    codigos = []
+    valores_invalidos = []
+
+    for parte in re.split(r"[,;\s]+", str(texto or "").strip()):
+        if not parte:
+            continue
+
+        if parte.isdigit() and int(parte) > 0:
+            codigos.append(int(parte))
+        else:
+            valores_invalidos.append(parte)
+
+    return list(dict.fromkeys(codigos)), valores_invalidos
+
+
 def primeira_coluna_existente(df, candidatas):
     if df is None or df.empty:
         return None
@@ -150,6 +166,12 @@ def limpar_session_state_servicos():
         "nome_servico_atual"
     ]:
         st.session_state.pop(chave, None)
+
+    for chave in list(st.session_state.keys()):
+        if chave.startswith("filtro_servico_") or chave.startswith("catser_selecionados_"):
+            st.session_state.pop(chave, None)
+
+    st.session_state.pop("catser_adicionais_servico", None)
 
     limpar_session_state_precos()
 
@@ -1119,23 +1141,6 @@ with aba_principal:
 
     st.session_state.setdefault("codigo_pdm_manual", 8435)
     st.session_state.setdefault("nome_pdm_manual", "Notebook")
-    st.session_state.setdefault("codigo_servico_manual", 27782)
-    st.session_state.setdefault(
-        "nome_servico_manual",
-        "PRESTACAO DE SERVICO DE LIMPEZA E CONSERVACAO"
-    )
-
-    if tipo_catalogo == TIPO_SERVICO:
-        try:
-            codigo_servico_atual = int(st.session_state.get("codigo_servico_manual", 0))
-        except Exception:
-            codigo_servico_atual = 0
-
-        if codigo_servico_atual <= 1:
-            st.session_state["codigo_servico_manual"] = 27782
-
-        if not str(st.session_state.get("nome_servico_manual", "")).strip():
-            st.session_state["nome_servico_manual"] = "PRESTACAO DE SERVICO DE LIMPEZA E CONSERVACAO"
 
     if tipo_catalogo == TIPO_MATERIAL:
         st.header("1. Localizar PDM")
@@ -1572,6 +1577,8 @@ with aba_principal:
                 st.session_state.pop("diagnostico_servicos", None)
                 st.warning("Informe pelo menos dois caracteres para buscar serviço.")
             else:
+                limpar_session_state_precos()
+
                 with st.spinner("Carregando catálogo de serviços e filtrando resultados..."):
                     df_catalogo_servicos, diagnostico_servicos = carregar_catalogo_servicos(
                         somente_ativos=True,
@@ -1589,10 +1596,18 @@ with aba_principal:
                 st.session_state["diagnostico_servicos"] = diagnostico_servicos
 
         df_servicos_encontrados = st.session_state.get("df_servicos_encontrados")
+        diagnostico_servicos = st.session_state.get("diagnostico_servicos", {})
+        codigos_selecionados_busca = []
 
-        if df_servicos_encontrados is not None:
-            diagnostico_servicos = st.session_state.get("diagnostico_servicos", {})
+        st.header("2. Selecionar CATSERs similares")
+        st.caption(
+            "Refine os resultados por características e selecione um ou mais CATSERs "
+            "que representem serviços comparáveis para a consulta de preços."
+        )
 
+        if df_servicos_encontrados is None:
+            st.info("Faça uma busca para localizar e selecionar CATSERs similares.")
+        else:
             if df_servicos_encontrados.empty:
                 if diagnostico_servicos.get("erros"):
                     st.error("Não foi possível carregar o catálogo de serviços na API do Compras.gov.br.")
@@ -1603,64 +1618,55 @@ with aba_principal:
 
                 df_servicos_carac = criar_tabela_caracteristicas_servicos(df_servicos_encontrados)
                 candidatas_servico = identificar_colunas_caracteristicas(df_servicos_carac)
-
-                st.header("4. Filtros dinâmicos por características do serviço")
-
-                st.write("Serviços localizados:", len(df_servicos_carac))
-
-                st.caption(
-                    "Os filtros abaixo são extraídos do grupo, classe e partes do nome do serviço. "
-                    "Em serviços com nomes compostos, cada trecho separado por hífen vira uma característica filtrável."
-                )
+                assinatura_busca_servico = re.sub(
+                    r"[^A-Z0-9]+",
+                    "_",
+                    normalizar_texto(termo_busca_servico)
+                ).strip("_") or "BUSCA"
 
                 filtros_servico = {}
 
-                if not candidatas_servico:
-                    st.warning("Não foram identificadas características estruturáveis nos serviços localizados.")
-                else:
-                    limite_superior_servico = min(20, len(candidatas_servico))
-
-                    max_filtros_servico = st.slider(
-                        "Quantidade máxima de características de serviço exibidas",
-                        min_value=1,
-                        max_value=limite_superior_servico,
-                        value=min(10, limite_superior_servico),
-                        key="max_filtros_dinamicos_servico"
+                with st.expander("Refinar lista de CATSERs por características", expanded=True):
+                    st.caption(
+                        "Os filtros são extraídos do grupo, da classe e das partes do nome do serviço."
                     )
 
-                    cols_servico = st.columns(3)
+                    if not candidatas_servico:
+                        st.warning("Não foram identificadas características estruturáveis nos serviços localizados.")
+                    else:
+                        cols_servico = st.columns(3)
 
-                    for i, item in enumerate(candidatas_servico[:max_filtros_servico]):
-                        coluna = item["coluna"]
-                        nome = item["nome"]
+                        for i, item in enumerate(candidatas_servico[:6]):
+                            coluna = item["coluna"]
+                            nome = item["nome"]
 
-                        valores = (
-                            df_servicos_carac[coluna]
-                            .dropna()
-                            .astype(str)
-                            .str.strip()
-                            .sort_values()
-                            .unique()
-                            .tolist()
-                        )
-
-                        with cols_servico[i % 3]:
-                            selecionados = st.multiselect(
-                                label=f"{nome}",
-                                options=valores,
-                                default=[],
-                                key=f"filtro_servico_{coluna}"
+                            valores = (
+                                df_servicos_carac[coluna]
+                                .dropna()
+                                .astype(str)
+                                .str.strip()
+                                .sort_values()
+                                .unique()
+                                .tolist()
                             )
 
-                        filtros_servico[coluna] = selecionados
+                            with cols_servico[i % 3]:
+                                selecionados = st.multiselect(
+                                    label=nome,
+                                    options=valores,
+                                    default=[],
+                                    key=f"filtro_servico_{assinatura_busca_servico}_{coluna}"
+                                )
+
+                            filtros_servico[coluna] = selecionados
 
                 df_servicos_filtrado = aplicar_filtros_dinamicos(
                     df_servicos_carac,
                     filtros_servico
                 )
 
-                st.header("5. CATSERs candidatos após filtros")
-                st.write("CATSERs após filtros:", len(df_servicos_filtrado))
+                st.subheader("CATSERs candidatos")
+                st.write("Resultados após os filtros:", len(df_servicos_filtrado))
 
                 colunas_servico_base = [
                     "codigoServico",
@@ -1689,66 +1695,69 @@ with aba_principal:
 
                 if df_servicos_filtrado.empty:
                     st.warning("Nenhum CATSER permaneceu após os filtros.")
-                    df_servicos_selecao = pd.DataFrame()
                 else:
-                    df_servicos_selecao = df_servicos_filtrado.reset_index(drop=True)
-
-                def formatar_opcao_servico(indice):
-                    linha = df_servicos_selecao.iloc[indice]
-                    return (
-                        f"{int(linha['codigoServico'])} - {linha.get('nomeServico', '')} "
-                        f"| Grupo {linha.get('codigoGrupo', '')} - {linha.get('nomeGrupo', '')}"
+                    df_servicos_selecao = (
+                        df_servicos_filtrado
+                        .dropna(subset=["codigoServico"])
+                        .drop_duplicates(subset=["codigoServico"])
+                        .reset_index(drop=True)
                     )
+                    mapa_servicos = {
+                        int(linha["codigoServico"]): linha
+                        for _, linha in df_servicos_selecao.iterrows()
+                    }
+                    codigos_disponiveis_servico = list(mapa_servicos.keys())
 
-                if not df_servicos_selecao.empty:
-                    indice_servico = st.selectbox(
-                        "Selecione o CATSER filtrado",
-                        options=list(range(len(df_servicos_selecao))),
-                        format_func=formatar_opcao_servico,
-                        key="indice_servico_localizado"
-                    )
-
-                    col_usar_servico_1, col_usar_servico_2 = st.columns([1, 4])
-
-                    with col_usar_servico_1:
-                        if st.button("Usar este CATSER"):
-                            linha_servico = df_servicos_selecao.iloc[int(indice_servico)]
-                            limpar_session_state_servicos()
-                            st.session_state["codigo_servico_manual"] = int(linha_servico["codigoServico"])
-                            st.session_state["nome_servico_manual"] = str(linha_servico.get("nomeServico", ""))
-                            st.rerun()
-
-                    with col_usar_servico_2:
-                        st.caption(
-                            "Ao usar um CATSER filtrado, os preços carregados anteriormente são limpos."
+                    def formatar_opcao_servico(codigo):
+                        linha = mapa_servicos[int(codigo)]
+                        return (
+                            f"{int(codigo)} - {linha.get('nomeServico', '')} "
+                            f"| {linha.get('nomeClasse', '')}"
                         )
 
-            with st.expander("Diagnóstico da busca de serviço"):
+                    codigos_selecionados_busca = st.multiselect(
+                        "Selecione os CATSERs similares para consultar preços",
+                        options=codigos_disponiveis_servico,
+                        default=[],
+                        format_func=formatar_opcao_servico,
+                        key=f"catser_selecionados_{assinatura_busca_servico}"
+                    )
+
+            with st.expander("Diagnóstico da busca de serviço", expanded=False):
                 st.json(diagnostico_servicos)
 
-        st.header("6. Confirmar serviço")
-
-        col_servico_1, col_servico_2 = st.columns(2)
-
-        with col_servico_1:
-            codigo_servico = st.number_input(
-                "Código CATSER",
-                min_value=1,
-                step=1,
-                key="codigo_servico_manual"
+        with st.expander("Adicionar CATSERs conhecidos", expanded=False):
+            texto_catser_adicionais = st.text_input(
+                "Códigos CATSER adicionais",
+                placeholder="Ex.: 4006, 27626",
+                key="catser_adicionais_servico",
+                help="Separe vários códigos por vírgula, espaço ou ponto e vírgula."
             )
 
-        with col_servico_2:
-            nome_servico_informado = st.text_input(
-                "Nome do serviço, opcional",
-                key="nome_servico_manual"
-            )
-
-        st.caption(
-            "Para serviços, a consulta usa o código CATSER diretamente, sem etapa de PDM/CATMAT."
+        codigos_adicionais_servico, codigos_invalidos_servico = parsear_codigos_catalogo(
+            texto_catser_adicionais
         )
 
-        st.header("7. Consulta de preços")
+        if codigos_invalidos_servico:
+            st.warning(
+                "Ignorei valores que não são códigos CATSER válidos: "
+                + ", ".join(codigos_invalidos_servico)
+            )
+
+        codigos_servico_consulta = list(dict.fromkeys(
+            [int(codigo) for codigo in codigos_selecionados_busca]
+            + codigos_adicionais_servico
+        ))
+
+        if codigos_servico_consulta:
+            st.success(
+                f"{len(codigos_servico_consulta)} CATSER(s) selecionado(s) para comparação: "
+                + ", ".join(str(codigo) for codigo in codigos_servico_consulta)
+            )
+        else:
+            st.info("Selecione pelo menos um CATSER para habilitar a consulta de preços.")
+
+        st.header("3. Consulta de preços")
 
         col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
 
@@ -1786,31 +1795,32 @@ with aba_principal:
                 key="tamanho_pagina_preco_servico"
             )
 
-        if st.button("Consultar preços do CATSER selecionado"):
-            limpar_session_state_precos()
+        if st.button("Consultar preços dos CATSERs selecionados"):
+            if not codigos_servico_consulta:
+                st.warning("Selecione pelo menos um CATSER antes de consultar preços.")
+            else:
+                limpar_session_state_precos()
 
-            with st.spinner("Consultando preços praticados para o serviço..."):
-                resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
-                    codigos_itens=[int(codigo_servico)],
-                    data_inicial=data_inicial_servico,
-                    data_final=data_final_servico,
-                    tipo_catalogo="servico",
-                    max_paginas_por_item=int(max_paginas_preco_servico),
-                    tamanho_pagina=int(tamanho_pagina_preco_servico)
-                )
+                with st.spinner("Consultando preços praticados para os serviços selecionados..."):
+                    resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
+                        codigos_itens=codigos_servico_consulta,
+                        data_inicial=data_inicial_servico,
+                        data_final=data_final_servico,
+                        tipo_catalogo="servico",
+                        max_paginas_por_item=int(max_paginas_preco_servico),
+                        tamanho_pagina=int(tamanho_pagina_preco_servico)
+                    )
 
-            st.session_state["resultados_precos"] = resultados_precos
-            st.session_state["erros_precos"] = erros_precos
-            st.session_state["urls_precos"] = urls_precos
-            st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
-            st.session_state["codigos_catalogo_consultados"] = [int(codigo_servico)]
-            st.session_state["tipo_catalogo_precos"] = "CATSER"
-            st.session_state["coluna_codigo_consultado_precos"] = "catser_consultado"
-            st.session_state["arquivo_csv_precos"] = "precos_consolidados_catser.csv"
-            st.session_state["codigo_servico_atual"] = int(codigo_servico)
-            st.session_state["nome_servico_atual"] = nome_servico_informado
-            st.session_state["data_inicial_precos_final"] = data_inicial_servico
-            st.session_state["data_final_precos_final"] = data_final_servico
+                st.session_state["resultados_precos"] = resultados_precos
+                st.session_state["erros_precos"] = erros_precos
+                st.session_state["urls_precos"] = urls_precos
+                st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
+                st.session_state["codigos_catalogo_consultados"] = codigos_servico_consulta
+                st.session_state["tipo_catalogo_precos"] = "CATSER"
+                st.session_state["coluna_codigo_consultado_precos"] = "catser_consultado"
+                st.session_state["arquivo_csv_precos"] = "precos_consolidados_catser.csv"
+                st.session_state["data_inicial_precos_final"] = data_inicial_servico
+                st.session_state["data_final_precos_final"] = data_final_servico
 
     if "df_precos" in st.session_state:
         df_precos = st.session_state["df_precos"]
@@ -1826,7 +1836,8 @@ with aba_principal:
             "precos_consolidados_catmat.csv"
         )
 
-        st.header(f"7. Resultados consolidados de preços ({tipo_precos})")
+        numero_resultados = 4 if tipo_precos == "CATSER" else 7
+        st.header(f"{numero_resultados}. Resultados consolidados de preços ({tipo_precos})")
 
         st.write("Registros de preços carregados:", len(df_precos))
 
