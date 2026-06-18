@@ -2,6 +2,7 @@
 import re
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 import pandas as pd
@@ -238,16 +239,90 @@ def carregar_catalogo_pdms(somente_ativos=True, max_paginas=40, tamanho_pagina=5
     if somente_ativos:
         params["statusPdm"] = True
 
-    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
-        endpoint="/modulo-material/3_consultarPdmMaterial",
-        params_base=params,
-        tamanho_pagina=int(tamanho_pagina),
-        max_paginas=int(max_paginas),
-        timeout=10,
-        tentativas_por_pagina=1,
-        pular_pagina_com_erro=False,
-        pausa_entre_paginas=0
-    )
+    def consultar_pagina_pdm(pagina):
+        params_pagina = dict(params)
+        params_pagina["pagina"] = int(pagina)
+        params_pagina["tamanhoPagina"] = int(tamanho_pagina)
+
+        try:
+            response = consultar_endpoint(
+                endpoint="/modulo-material/3_consultarPdmMaterial",
+                params=params_pagina,
+                timeout=15
+            )
+
+            if response.status_code != 200:
+                return {
+                    "resultado": [],
+                    "total_registros": None,
+                    "total_paginas": None,
+                    "url": response.url,
+                    "erro": {
+                        "pagina": pagina,
+                        "status": response.status_code,
+                        "mensagem": response.text,
+                        "url": response.url
+                    }
+                }
+
+            data = response.json()
+
+            return {
+                "resultado": data.get("resultado", []),
+                "total_registros": data.get("totalRegistros"),
+                "total_paginas": data.get("totalPaginas"),
+                "url": response.url,
+                "erro": None
+            }
+
+        except Exception as e:
+            return {
+                "resultado": [],
+                "total_registros": None,
+                "total_paginas": None,
+                "url": f"{BASE_URL}/modulo-material/3_consultarPdmMaterial",
+                "erro": {
+                    "pagina": pagina,
+                    "status": "erro",
+                    "mensagem": str(e),
+                    "url": f"{BASE_URL}/modulo-material/3_consultarPdmMaterial"
+                }
+            }
+
+    primeira_pagina = consultar_pagina_pdm(1)
+    resultados = list(primeira_pagina["resultado"])
+    erros = []
+    urls = [primeira_pagina["url"]]
+    total_registros = primeira_pagina["total_registros"]
+    total_paginas = primeira_pagina["total_paginas"]
+
+    if primeira_pagina["erro"]:
+        erros.append(primeira_pagina["erro"])
+
+    paginas_a_consultar = []
+
+    if not erros:
+        try:
+            paginas_disponiveis = int(total_paginas) if total_paginas is not None else int(max_paginas)
+        except Exception:
+            paginas_disponiveis = int(max_paginas)
+
+        total_paginas_consulta = min(paginas_disponiveis, int(max_paginas))
+        paginas_a_consultar = list(range(2, total_paginas_consulta + 1))
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futuros = {
+            executor.submit(consultar_pagina_pdm, pagina): pagina
+            for pagina in paginas_a_consultar
+        }
+
+        for futuro in as_completed(futuros):
+            retorno = futuro.result()
+            resultados.extend(retorno["resultado"])
+            urls.append(retorno["url"])
+
+            if retorno["erro"]:
+                erros.append(retorno["erro"])
 
     df = pd.DataFrame(resultados)
 
