@@ -127,7 +127,8 @@ def consultar_paginas(
     max_paginas=10,
     timeout=120,
     tentativas_por_pagina=3,
-    pular_pagina_com_erro=True
+    pular_pagina_com_erro=True,
+    pausa_entre_paginas=0.2
 ):
     resultados = []
     erros = []
@@ -224,9 +225,134 @@ def consultar_paginas(
         if total_registros_int > 0 and len(resultados) >= total_registros_int:
             break
 
-        time.sleep(0.2)
+        if pausa_entre_paginas:
+            time.sleep(float(pausa_entre_paginas))
 
     return resultados, erros, total_registros, total_paginas, urls_consultadas
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_catalogo_pdms(somente_ativos=True, max_paginas=40, tamanho_pagina=500):
+    params = {}
+
+    if somente_ativos:
+        params["statusPdm"] = True
+
+    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
+        endpoint="/modulo-material/3_consultarPdmMaterial",
+        params_base=params,
+        tamanho_pagina=int(tamanho_pagina),
+        max_paginas=int(max_paginas),
+        timeout=10,
+        tentativas_por_pagina=1,
+        pular_pagina_com_erro=False,
+        pausa_entre_paginas=0
+    )
+
+    df = pd.DataFrame(resultados)
+
+    if not df.empty and "codigoPdm" in df.columns:
+        df = (
+            df
+            .dropna(subset=["codigoPdm"])
+            .drop_duplicates(subset=["codigoPdm"])
+            .sort_values(["nomePdm", "codigoPdm"], na_position="last")
+            .reset_index(drop=True)
+        )
+
+    diagnostico = {
+        "total_registros_api": total_registros,
+        "total_paginas_api": total_paginas,
+        "quantidade_carregada": int(len(df)),
+        "erros": erros,
+        "urls": urls
+    }
+
+    return df, diagnostico
+
+
+def localizar_pdms_por_termo(df_pdms, termo, limite=50):
+    if df_pdms is None or df_pdms.empty:
+        return pd.DataFrame()
+
+    termo_normalizado = normalizar_texto(termo)
+    tokens = [
+        token
+        for token in termo_normalizado.split()
+        if len(token) >= 2
+    ]
+
+    if not tokens:
+        return pd.DataFrame()
+
+    df_busca = df_pdms.copy()
+
+    for coluna in ["nomePdm", "nomeClasse", "nomeGrupo"]:
+        if coluna not in df_busca.columns:
+            df_busca[coluna] = ""
+
+        df_busca[f"{coluna}_normalizado"] = df_busca[coluna].apply(normalizar_texto)
+
+    texto_busca = (
+        df_busca["nomePdm_normalizado"]
+        + " "
+        + df_busca["nomeClasse_normalizado"]
+        + " "
+        + df_busca["nomeGrupo_normalizado"]
+    )
+
+    mask = texto_busca.apply(
+        lambda texto: all(token in texto for token in tokens)
+    )
+
+    encontrados = df_busca[mask].copy()
+
+    if encontrados.empty:
+        return encontrados
+
+    def calcular_pontuacao(linha):
+        nome_pdm = linha["nomePdm_normalizado"]
+        nome_classe = linha["nomeClasse_normalizado"]
+        nome_grupo = linha["nomeGrupo_normalizado"]
+
+        if nome_pdm == termo_normalizado:
+            return 0
+
+        if nome_pdm.startswith(termo_normalizado):
+            return 1
+
+        if all(token in nome_pdm for token in tokens):
+            return 2
+
+        if all(token in nome_classe for token in tokens):
+            return 3
+
+        if all(token in nome_grupo for token in tokens):
+            return 4
+
+        return 5
+
+    encontrados["pontuacao_busca"] = encontrados.apply(calcular_pontuacao, axis=1)
+    encontrados["tamanho_nome_pdm"] = encontrados["nomePdm"].fillna("").astype(str).str.len()
+
+    colunas_exibir = [
+        "codigoPdm",
+        "nomePdm",
+        "codigoClasse",
+        "nomeClasse",
+        "codigoGrupo",
+        "nomeGrupo",
+        "statusPdm",
+        "dataHoraAtualizacao"
+    ]
+    colunas_exibir = [coluna for coluna in colunas_exibir if coluna in encontrados.columns]
+
+    return (
+        encontrados
+        .sort_values(["pontuacao_busca", "tamanho_nome_pdm", "nomePdm"], na_position="last")
+        .head(int(limite))[colunas_exibir]
+        .reset_index(drop=True)
+    )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -590,7 +716,115 @@ aba_principal, aba_direta = st.tabs([
 # ============================================================
 
 with aba_principal:
-    st.header("1. Informar PDM")
+    st.session_state.setdefault("codigo_pdm_manual", 8435)
+    st.session_state.setdefault("nome_pdm_manual", "Notebook")
+
+    st.header("1. Localizar PDM")
+
+    col_busca_pdm_1, col_busca_pdm_2, col_busca_pdm_3 = st.columns([3, 1, 1])
+
+    with col_busca_pdm_1:
+        termo_busca_pdm = st.text_input(
+            "Buscar PDM por nome, classe ou grupo",
+            value="notebook",
+            placeholder="Ex.: notebook, monitor, impressora, licença",
+            key="termo_busca_pdm"
+        )
+
+    with col_busca_pdm_2:
+        limite_resultados_pdm = st.number_input(
+            "Resultados",
+            min_value=5,
+            max_value=100,
+            value=25,
+            step=5,
+            key="limite_resultados_pdm"
+        )
+
+    with col_busca_pdm_3:
+        st.write("")
+        st.write("")
+        buscar_pdm = st.button("Buscar PDM")
+
+    if buscar_pdm:
+        if len(normalizar_texto(termo_busca_pdm)) < 2:
+            st.session_state.pop("df_pdms_encontrados", None)
+            st.session_state.pop("diagnostico_pdms", None)
+            st.warning("Informe pelo menos dois caracteres para buscar PDM.")
+        else:
+            with st.spinner("Carregando catálogo de PDMs e filtrando resultados..."):
+                df_catalogo_pdms, diagnostico_pdms = carregar_catalogo_pdms(
+                    somente_ativos=True,
+                    max_paginas=40,
+                    tamanho_pagina=500
+                )
+
+                df_pdms_encontrados = localizar_pdms_por_termo(
+                    df_catalogo_pdms,
+                    termo_busca_pdm,
+                    limite=int(limite_resultados_pdm)
+                )
+
+            st.session_state["df_pdms_encontrados"] = df_pdms_encontrados
+            st.session_state["diagnostico_pdms"] = diagnostico_pdms
+
+    df_pdms_encontrados = st.session_state.get("df_pdms_encontrados")
+
+    if df_pdms_encontrados is not None:
+        diagnostico_pdms = st.session_state.get("diagnostico_pdms", {})
+
+        if df_pdms_encontrados.empty:
+            if diagnostico_pdms.get("erros"):
+                st.error("Não foi possível carregar o catálogo de PDMs na API do Compras.gov.br.")
+            else:
+                st.warning("Nenhum PDM encontrado para o termo informado.")
+        else:
+            st.success(f"{len(df_pdms_encontrados)} PDM(s) encontrado(s).")
+
+            def formatar_opcao_pdm(indice):
+                linha = df_pdms_encontrados.iloc[indice]
+                return (
+                    f"{int(linha['codigoPdm'])} - {linha.get('nomePdm', '')} "
+                    f"| Classe {linha.get('codigoClasse', '')} - {linha.get('nomeClasse', '')}"
+                )
+
+            indice_pdm = st.selectbox(
+                "Selecione o PDM localizado",
+                options=list(range(len(df_pdms_encontrados))),
+                format_func=formatar_opcao_pdm,
+                key="indice_pdm_localizado"
+            )
+
+            col_usar_pdm_1, col_usar_pdm_2 = st.columns([1, 4])
+
+            with col_usar_pdm_1:
+                if st.button("Usar este PDM"):
+                    linha_pdm = df_pdms_encontrados.iloc[int(indice_pdm)]
+                    limpar_session_state_catmat()
+                    st.session_state["codigo_pdm_manual"] = int(linha_pdm["codigoPdm"])
+                    st.session_state["nome_pdm_manual"] = str(linha_pdm.get("nomePdm", ""))
+                    st.rerun()
+
+            with col_usar_pdm_2:
+                st.caption(
+                    "Ao usar um PDM localizado, os CATMATs e preços carregados anteriormente são limpos."
+                )
+
+            colunas_pdm = [
+                "codigoPdm",
+                "nomePdm",
+                "codigoClasse",
+                "nomeClasse",
+                "codigoGrupo",
+                "nomeGrupo"
+            ]
+            colunas_pdm = [coluna for coluna in colunas_pdm if coluna in df_pdms_encontrados.columns]
+            st.dataframe(df_pdms_encontrados[colunas_pdm], use_container_width=True, hide_index=True)
+
+        with st.expander("Diagnóstico da busca de PDM"):
+            st.json(diagnostico_pdms)
+
+    st.header("2. Confirmar PDM")
 
     col_pdm_1, col_pdm_2 = st.columns(2)
 
@@ -598,22 +832,22 @@ with aba_principal:
         codigo_pdm = st.number_input(
             "Código PDM",
             min_value=1,
-            value=8435,
-            step=1
+            step=1,
+            key="codigo_pdm_manual"
         )
 
     with col_pdm_2:
         nome_pdm_informado = st.text_input(
             "Nome do PDM, opcional",
-            value="Notebook"
+            key="nome_pdm_manual"
         )
 
     st.caption(
-        "Informe o PDM para carregar CATMATs relacionados e consultar preços praticados. "
+        "Você pode usar o localizador acima ou informar o código manualmente. "
         "Exemplo: Notebook = 8435; Tesoura = 249."
     )
 
-    st.header("2. Carregar CATMATs do PDM")
+    st.header("3. Carregar CATMATs do PDM")
 
     col_catmat_1, col_catmat_2, col_catmat_3 = st.columns(3)
 
@@ -675,7 +909,7 @@ with aba_principal:
         urls_itens = st.session_state.get("urls_itens", [])
         diagnostico_itens = st.session_state.get("diagnostico_itens", {})
 
-        st.header("3. Filtros dinâmicos por características do PDM")
+        st.header("4. Filtros dinâmicos por características do PDM")
 
         st.write("Total de CATMATs informado pela API:", total_itens)
         st.write("Total de páginas informado pela API:", paginas_itens)
@@ -771,7 +1005,7 @@ with aba_principal:
 
             df_filtrado = aplicar_filtros_dinamicos(df_itens_carac, filtros)
 
-            st.header("4. CATMATs candidatos após filtros")
+            st.header("5. CATMATs candidatos após filtros")
             st.write("CATMATs após filtros:", len(df_filtrado))
 
             colunas_base = [
@@ -827,7 +1061,7 @@ with aba_principal:
                     key="codigos_catmat_selecionados"
                 )
 
-                st.header("5. Consulta de preços")
+                st.header("6. Consulta de preços")
 
                 col_preco_1, col_preco_2, col_preco_3, col_preco_4 = st.columns(4)
 
@@ -895,7 +1129,7 @@ with aba_principal:
         erros_precos = st.session_state.get("erros_precos", [])
         urls_precos = st.session_state.get("urls_precos", [])
 
-        st.header("6. Resultados consolidados de preços")
+        st.header("7. Resultados consolidados de preços")
 
         st.write("Registros de preços carregados:", len(df_precos))
 
