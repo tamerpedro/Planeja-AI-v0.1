@@ -20,9 +20,9 @@ st.set_page_config(
 
 BASE_URL = "https://dadosabertos.compras.gov.br"
 
-st.title("PlanejaIA - Protótipo inicial")
+st.title("PlanejaIA - Consulta de preços públicos")
 st.write(
-    "Da descrição de itens até CATMAT, preços públicos e minuta semiestruturada de DOD Dataprev."
+    "Consulta de CATMATs e preços praticados em bases públicas para apoio ao planejamento da contratação."
 )
 
 st.divider()
@@ -53,6 +53,13 @@ def formatar_brl(valor):
         .replace(".", ",")
         .replace("X", ".")
     )
+
+
+def formatar_percentual(valor):
+    if valor is None or pd.isna(valor):
+        return "N/A"
+
+    return f"{valor * 100:.2f}%".replace(".", ",")
 
 
 def primeira_coluna_existente(df, candidatas):
@@ -500,12 +507,32 @@ def exibir_estatisticas_precos(df):
         st.warning("Não há preços válidos para cálculo estatístico.")
         return {}
 
+    preco_medio = float(df_precos[coluna_preco].mean())
+    desvio_padrao = float(df_precos[coluna_preco].std(ddof=0))
+    limite_superior = preco_medio + desvio_padrao
+    limite_inferior = preco_medio - desvio_padrao
+    coeficiente_variacao = (
+        desvio_padrao / preco_medio
+        if preco_medio > 0
+        else None
+    )
+    desvio_acima_25 = (
+        coeficiente_variacao > 0.25
+        if coeficiente_variacao is not None
+        else None
+    )
+
     estatisticas = {
         "registros_com_preco": int(len(df_precos)),
         "menor_preco": float(df_precos[coluna_preco].min()),
         "maior_preco": float(df_precos[coluna_preco].max()),
-        "preco_medio": float(df_precos[coluna_preco].mean()),
-        "mediana": float(df_precos[coluna_preco].median())
+        "preco_medio": preco_medio,
+        "mediana": float(df_precos[coluna_preco].median()),
+        "desvio_padrao": desvio_padrao,
+        "limite_superior": limite_superior,
+        "limite_inferior": limite_inferior,
+        "coeficiente_variacao": coeficiente_variacao,
+        "desvio_acima_25": desvio_acima_25
     }
 
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -516,209 +543,36 @@ def exibir_estatisticas_precos(df):
     col4.metric("Preço médio", formatar_brl(estatisticas["preco_medio"]))
     col5.metric("Mediana", formatar_brl(estatisticas["mediana"]))
 
+    col6, col7, col8, col9 = st.columns(4)
+
+    col6.metric("Desvio padrão", formatar_brl(estatisticas["desvio_padrao"]))
+    col7.metric("Limite superior", formatar_brl(estatisticas["limite_superior"]))
+    col8.metric("Limite inferior", formatar_brl(estatisticas["limite_inferior"]))
+    col9.metric(
+        "Desvio vs preço médio",
+        formatar_percentual(estatisticas["coeficiente_variacao"])
+    )
+
+    if estatisticas["desvio_acima_25"] is None:
+        st.info(
+            "Não foi possível comparar o desvio padrão com 25% do preço médio, pois o preço médio é zero ou inválido."
+        )
+    elif estatisticas["desvio_acima_25"]:
+        st.warning(
+            "Indicador de dispersão: o desvio padrão está acima de 25% do preço médio."
+        )
+    else:
+        st.success(
+            "Indicador de dispersão: o desvio padrão está abaixo ou igual a 25% do preço médio."
+        )
+
     st.caption(
         "A média pode ser distorcida por outliers. Para planejamento preliminar, "
-        "a mediana tende a ser uma referência mais robusta."
+        "a mediana tende a ser uma referência mais robusta. Os limites inferior e "
+        "superior correspondem à média menos/mais um desvio padrão."
     )
 
     return estatisticas
-
-
-def gerar_resumo_dod(
-    demanda_texto,
-    quantidade,
-    codigo_pdm,
-    nome_pdm,
-    codigos_catmat,
-    df_precos,
-    estatisticas,
-    data_inicial,
-    data_final
-):
-    fornecedor_col = primeira_coluna_existente(
-        df_precos,
-        ["nomeFornecedor", "fornecedor", "razaoSocialFornecedor"]
-    )
-
-    orgao_col = primeira_coluna_existente(
-        df_precos,
-        ["nomeOrgao", "orgao", "nomeOrgaoSuperior"]
-    )
-
-    descricao_col = primeira_coluna_existente(
-        df_precos,
-        ["descricaoItem", "descricao", "descricao_item"]
-    )
-
-    fornecedores = []
-    orgaos = []
-    descricoes = []
-
-    if fornecedor_col:
-        fornecedores = (
-            df_precos[fornecedor_col]
-            .fillna("Não informado")
-            .value_counts()
-            .head(10)
-            .index
-            .tolist()
-        )
-
-    if orgao_col:
-        orgaos = (
-            df_precos[orgao_col]
-            .fillna("Não informado")
-            .value_counts()
-            .head(10)
-            .index
-            .tolist()
-        )
-
-    if descricao_col:
-        descricoes = (
-            df_precos[descricao_col]
-            .dropna()
-            .drop_duplicates()
-            .head(10)
-            .tolist()
-        )
-
-    resumo = {
-        "demanda": demanda_texto,
-        "quantidade_estimada": quantidade,
-        "codigo_pdm": codigo_pdm,
-        "nome_pdm": nome_pdm,
-        "catmats_considerados": codigos_catmat,
-        "periodo_pesquisa": {
-            "data_inicial": data_inicial.strftime("%Y-%m-%d"),
-            "data_final": data_final.strftime("%Y-%m-%d")
-        },
-        "registros_de_preco": int(len(df_precos)),
-        "estatisticas": {
-            "registros_com_preco": estatisticas.get("registros_com_preco"),
-            "menor_preco": formatar_brl(estatisticas.get("menor_preco")),
-            "maior_preco": formatar_brl(estatisticas.get("maior_preco")),
-            "preco_medio": formatar_brl(estatisticas.get("preco_medio")),
-            "mediana": formatar_brl(estatisticas.get("mediana"))
-        },
-        "fornecedores_recorrentes": fornecedores,
-        "orgaos_compradores_recorrentes": orgaos,
-        "descricoes_de_itens_encontradas": descricoes
-    }
-
-    return resumo
-
-
-def gerar_texto_base_dod_dataprev(resumo, metadados_dod):
-    demanda = resumo.get("demanda", "")
-    quantidade = resumo.get("quantidade_estimada", "")
-    codigo_pdm = resumo.get("codigo_pdm", "")
-    nome_pdm = resumo.get("nome_pdm", "")
-    catmats = resumo.get("catmats_considerados", [])
-    estat = resumo.get("estatisticas", {})
-    periodo = resumo.get("periodo_pesquisa", {})
-
-    motivacao = metadados_dod.get("motivacao", "Nova contratação")
-    riscos = metadados_dod.get("riscos", "Descontinuidade operacional, atraso na entrega de serviços e aumento de custos por aquisição emergencial.")
-    resultados = metadados_dod.get("resultados", "Padronização do objeto, contratação tempestiva e melhoria da eficiência operacional.")
-    data_prevista = metadados_dod.get("data_prevista", "A definir")
-    fornecedores = metadados_dod.get("fornecedores", "Sem fornecedor previamente definido")
-    areas_internas = metadados_dod.get("areas_internas", "Área demandante; área de contratações; área técnica")
-    clientes_externos = metadados_dod.get("clientes_externos", "Não se aplica")
-    info_adicionais = metadados_dod.get("informacoes_adicionais", "Pesquisa baseada em dados abertos do Compras.gov.br.")
-    notas = metadados_dod.get("notas", "Documento preliminar para refinamento em ETP/TR.")
-    anexos = metadados_dod.get("anexos", "Anexar planilha de preços e memória de cálculo.")
-
-    itens_descritos = resumo.get("descricoes_de_itens_encontradas", [])
-    itens_preview = "\n".join([f"- {d}" for d in itens_descritos[:10]]) if itens_descritos else "- Item detalhado na demanda textual."
-
-    opcoes = [
-        "( ) Atendimento de obrigação legal/regulatória",
-        "( ) Continuidade de contrato existente",
-        "(X) Nova contratação",
-        "( ) Expansão/evolução de solução existente"
-    ]
-
-    texto = f"""
-# Documento de Oficialização da Demanda (DOD) - Dataprev (minuta semiestruturada)
-
-## 2.1. CONTEXTO DE NEGÓCIO
-A demanda atende ao planejamento da área requisitante para viabilizar aquisição/contratação aderente ao PDM {codigo_pdm} - {nome_pdm}, com base em evidências de compras públicas e rastreabilidade dos CATMATs selecionados.
-
-## 3. CONTEXTO DA DEMANDA
-
-### 3.1. SITUAÇÃO ATUAL
-Processo atual com classificação manual de PDM/CATMAT, maior tempo de ciclo e baixa padronização da justificativa técnica.
-
-### 3.2. ESCOPO DA DEMANDA
-Demanda registrada: **{demanda}**.
-Quantidade estimada: **{quantidade}**.
-
-### 3.3. MOTIVAÇÃO DA DEMANDA
-
-#### 3.3.1. Assinalar com um X a opção que se enquadra na motivação da demanda:
-{chr(10).join(opcoes)}
-Motivação detalhada informada: {motivacao}.
-
-#### 3.3.2. Descrever os riscos envolvidos, caso a contratação não seja realizada.
-{riscos}
-
-#### 3.3.3. Descrever os resultados a serem alcançados com a contratação.
-{resultados}
-
-### 3.4. DATA PREVISTA PARA DISPONIBILIZAÇÃO DA DEMANDA
-{data_prevista}
-
-### 3.5. FORNECEDOR(ES) (SE HOUVER)
-{fornecedores}
-
-### 3.6. DESCRIÇÃO DOS OBJETOS E QUANTIDADES ENVOLVIDAS
-
-#### 3.6.1. Para contratos EXISTENTES:
-Não se aplica nesta minuta preliminar (validar com área gestora do contrato, se houver).
-
-#### 3.6.2. Para NOVA contratação:
-- PDM de referência: **{codigo_pdm} - {nome_pdm}**
-- CATMATs considerados: **{", ".join([str(c) for c in catmats]) if catmats else "A definir"}**
-- Itens observados na base pública:
-{itens_preview}
-- Período de pesquisa de preços: **{periodo.get("data_inicial")} a {periodo.get("data_final")}**
-- Registros com preço válido: **{estat.get("registros_com_preco")}**
-- Mediana preliminar: **{estat.get("mediana")}**
-
-### 3.7. SERVIÇOS ASSOCIADOS A DEMANDA:
-Marcar os serviços aplicáveis no refinamento do ETP/TR.
-
-#### 3.7.2. Para cada serviço, selecionado no item anterior, descrever as condições mínimas obrigatórias:
-
-##### 3.7.2.1. Orientação Técnica
-Caso aplicável, prever orientação para especificação, implantação e boas práticas de uso do objeto contratado.
-
-##### 3.7.2.2. Capacitação Técnica
-Caso aplicável, prever capacitação de usuários/gestores, com carga horária, público-alvo e material didático.
-
-##### 3.7.2.3. Suporte Técnico
-Caso aplicável, prever níveis de serviço (SLA), canais de atendimento e janelas de suporte.
-
-## 4. ÁREAS E PAPÉIS ENVOLVIDOS
-
-### 4.1. ÁREAS INTERNAS (DATAPREV)
-{areas_internas}
-
-### 4.2. CLIENTES EXTERNOS QUE FARÃO USO DA SOLUÇÃO/SOFTWARE (OU SERÃO BENEFICIADOS DIRETAMENTE)
-{clientes_externos}
-
-## 5. INFORMAÇÕES ADICIONAIS
-{info_adicionais}
-
-## 6. NOTAS
-{notas}
-
-## 7. ANEXOS
-{anexos}
-"""
-
-    return texto.strip()
 
 
 # ============================================================
@@ -726,7 +580,7 @@ Caso aplicável, prever níveis de serviço (SLA), canais de atendimento e janel
 # ============================================================
 
 aba_principal, aba_direta = st.tabs([
-    "Demanda → PDM manual → filtros → preços → DOD",
+    "Consulta assistida por PDM",
     "Consulta direta por CATMAT"
 ])
 
@@ -736,28 +590,11 @@ aba_principal, aba_direta = st.tabs([
 # ============================================================
 
 with aba_principal:
-    st.header("1. Descrever demanda")
+    st.header("1. Informar PDM")
 
-    demanda_texto = st.text_area(
-        "Descreva a demanda",
-        value=(
-            "Precisamos comprar 500 notebooks corporativos com tela de 16 polegadas, "
-            "32 GB de RAM, SSD NVMe de 512 GB, Wi-Fi 6, TPM 2.0 e garantia on site de 60 meses."
-        ),
-        height=120
-    )
+    col_pdm_1, col_pdm_2 = st.columns(2)
 
-    col_demanda_1, col_demanda_2, col_demanda_3 = st.columns(3)
-
-    with col_demanda_1:
-        quantidade = st.number_input(
-            "Quantidade estimada",
-            min_value=1,
-            value=500,
-            step=1
-        )
-
-    with col_demanda_2:
+    with col_pdm_1:
         codigo_pdm = st.number_input(
             "Código PDM",
             min_value=1,
@@ -765,14 +602,15 @@ with aba_principal:
             step=1
         )
 
-    with col_demanda_3:
+    with col_pdm_2:
         nome_pdm_informado = st.text_input(
             "Nome do PDM, opcional",
             value="Notebook"
         )
 
     st.caption(
-        "Nesta versão, o PDM é informado manualmente. Exemplo: Notebook = 8435; Tesoura = 249."
+        "Informe o PDM para carregar CATMATs relacionados e consultar preços praticados. "
+        "Exemplo: Notebook = 8435; Tesoura = 249."
     )
 
     st.header("2. Carregar CATMATs do PDM")
@@ -820,8 +658,6 @@ with aba_principal:
 
         df_itens_carac = criar_tabela_caracteristicas(df_itens)
 
-        st.session_state["demanda_texto"] = demanda_texto
-        st.session_state["quantidade"] = int(quantidade)
         st.session_state["codigo_pdm_atual"] = int(codigo_pdm)
         st.session_state["nome_pdm_atual"] = nome_pdm_informado
         st.session_state["df_itens_carac"] = df_itens_carac
@@ -1075,7 +911,7 @@ with aba_principal:
         else:
             st.dataframe(df_precos, use_container_width=True)
 
-            estatisticas = exibir_estatisticas_precos(df_precos)
+            exibir_estatisticas_precos(df_precos)
 
             fornecedor_col = primeira_coluna_existente(
                 df_precos,
@@ -1130,57 +966,6 @@ with aba_principal:
                 file_name="precos_consolidados_catmat.csv",
                 mime="text/csv"
             )
-
-            st.header("7. Insumos preliminares para DOD")
-
-            resumo = gerar_resumo_dod(
-                demanda_texto=st.session_state.get("demanda_texto", demanda_texto),
-                quantidade=st.session_state.get("quantidade", quantidade),
-                codigo_pdm=st.session_state.get("codigo_pdm_atual", codigo_pdm),
-                nome_pdm=st.session_state.get("nome_pdm_atual", nome_pdm_informado),
-                codigos_catmat=st.session_state.get("codigos_catmat_consultados", []),
-                df_precos=df_precos,
-                estatisticas=estatisticas,
-                data_inicial=st.session_state.get("data_inicial_precos_final", date(2024, 1, 1)),
-                data_final=st.session_state.get("data_final_precos_final", date.today())
-            )
-
-            with st.expander("Resumo estruturado para envio ao ChatGPT"):
-                st.json(resumo)
-
-            st.subheader("Parâmetros de preenchimento do DOD Dataprev")
-            col_dod_1, col_dod_2 = st.columns(2)
-            with col_dod_1:
-                motivacao_dod = st.text_input("Motivação detalhada", value="Nova contratação para atendimento da demanda.")
-                riscos_dod = st.text_area("Riscos se não contratar", value="Interrupção ou degradação dos serviços e aumento de risco operacional.", height=100)
-                resultados_dod = st.text_area("Resultados esperados", value="Melhorar eficiência e garantir continuidade operacional com objeto padronizado.", height=100)
-                data_prevista_dod = st.date_input("Data prevista para disponibilização")
-            with col_dod_2:
-                fornecedores_dod = st.text_area("Fornecedor(es), se houver", value="A definir após fase de seleção.", height=80)
-                areas_dod = st.text_area("Áreas internas Dataprev", value="Área demandante; área técnica; área de contratações.", height=80)
-                clientes_dod = st.text_area("Clientes externos beneficiados", value="Unidades usuárias do serviço/solução.", height=80)
-                infos_dod = st.text_area("Informações adicionais", value="Pesquisa baseada em dados abertos de compras públicas.", height=80)
-            metadados_dod = {
-                "motivacao": motivacao_dod,
-                "riscos": riscos_dod,
-                "resultados": resultados_dod,
-                "data_prevista": data_prevista_dod.strftime("%Y-%m-%d"),
-                "fornecedores": fornecedores_dod,
-                "areas_internas": areas_dod,
-                "clientes_externos": clientes_dod,
-                "informacoes_adicionais": infos_dod,
-                "notas": "Minuta semiestruturada gerada automaticamente para revisão da área técnica e de contratações.",
-                "anexos": "1) Planilha de preços consolidados; 2) Lista de CATMATs selecionados; 3) Evidências de pesquisa no Compras.gov.br."
-            }
-
-            texto_dod = gerar_texto_base_dod_dataprev(resumo, metadados_dod)
-
-            st.text_area(
-                "Texto-base preliminar para DOD",
-                value=texto_dod,
-                height=500
-            )
-
 
 # ============================================================
 # ABA 2 - CONSULTA DIRETA POR CATMAT
