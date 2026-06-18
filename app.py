@@ -22,6 +22,29 @@ st.set_page_config(
 BASE_URL = "https://dadosabertos.compras.gov.br"
 TIPO_MATERIAL = "Produto/material (CATMAT)"
 TIPO_SERVICO = "Serviço (CATSER)"
+STOPWORDS_BUSCA = {
+    "A",
+    "AS",
+    "AO",
+    "AOS",
+    "COM",
+    "DA",
+    "DAS",
+    "DE",
+    "DO",
+    "DOS",
+    "E",
+    "EM",
+    "NA",
+    "NAS",
+    "NO",
+    "NOS",
+    "O",
+    "OS",
+    "OU",
+    "PARA",
+    "POR"
+}
 
 st.title("PlanejaIA - Consulta de preços públicos")
 st.write(
@@ -63,6 +86,16 @@ def formatar_percentual(valor):
         return "N/A"
 
     return f"{valor * 100:.2f}%".replace(".", ",")
+
+
+def extrair_tokens_busca(termo):
+    termo_normalizado = normalizar_texto(termo)
+
+    return [
+        token
+        for token in termo_normalizado.split()
+        if len(token) >= 2 and token not in STOPWORDS_BUSCA
+    ]
 
 
 def primeira_coluna_existente(df, candidatas):
@@ -369,11 +402,7 @@ def localizar_pdms_por_termo(df_pdms, termo, limite=50):
         return pd.DataFrame()
 
     termo_normalizado = normalizar_texto(termo)
-    tokens = [
-        token
-        for token in termo_normalizado.split()
-        if len(token) >= 2
-    ]
+    tokens = extrair_tokens_busca(termo)
 
     if not tokens:
         return pd.DataFrame()
@@ -567,11 +596,7 @@ def localizar_servicos_por_termo(df_servicos, termo, limite=50):
         return pd.DataFrame()
 
     termo_normalizado = normalizar_texto(termo)
-    tokens = [
-        token
-        for token in termo_normalizado.split()
-        if len(token) >= 2
-    ]
+    tokens = extrair_tokens_busca(termo)
 
     if not tokens:
         return pd.DataFrame()
@@ -884,6 +909,42 @@ def criar_tabela_caracteristicas(df_itens):
 
         for chave, valor in caracteristicas.items():
             base[f"CARAC_{chave}"] = valor
+
+        registros.append(base)
+
+    return pd.DataFrame(registros)
+
+
+def criar_tabela_caracteristicas_servicos(df_servicos):
+    if df_servicos is None or df_servicos.empty:
+        return pd.DataFrame()
+
+    registros = []
+
+    for _, row in df_servicos.iterrows():
+        base = row.to_dict()
+
+        nome_grupo = str(row.get("nomeGrupo", "")).strip()
+        nome_classe = str(row.get("nomeClasse", "")).strip()
+        nome_servico = str(row.get("nomeServico", "")).strip()
+
+        if nome_grupo:
+            base["CARAC_GRUPO"] = nome_grupo.upper()
+
+        if nome_classe:
+            base["CARAC_CLASSE"] = nome_classe.upper()
+
+        partes = [
+            parte.strip().upper()
+            for parte in re.split(r"\s+-\s+", nome_servico)
+            if parte and parte.strip()
+        ]
+
+        if partes:
+            base["CARAC_SERVICO_BASE"] = partes[0]
+
+            for indice, parte in enumerate(partes[1:6], start=1):
+                base[f"CARAC_DETALHE_{indice}"] = parte
 
         registros.append(base)
 
@@ -1540,36 +1601,68 @@ with aba_principal:
             else:
                 st.success(f"{len(df_servicos_encontrados)} serviço(s) encontrado(s).")
 
-                def formatar_opcao_servico(indice):
-                    linha = df_servicos_encontrados.iloc[indice]
-                    return (
-                        f"{int(linha['codigoServico'])} - {linha.get('nomeServico', '')} "
-                        f"| Grupo {linha.get('codigoGrupo', '')} - {linha.get('nomeGrupo', '')}"
-                    )
+                df_servicos_carac = criar_tabela_caracteristicas_servicos(df_servicos_encontrados)
+                candidatas_servico = identificar_colunas_caracteristicas(df_servicos_carac)
 
-                indice_servico = st.selectbox(
-                    "Selecione o serviço localizado",
-                    options=list(range(len(df_servicos_encontrados))),
-                    format_func=formatar_opcao_servico,
-                    key="indice_servico_localizado"
+                st.header("4. Filtros dinâmicos por características do serviço")
+
+                st.write("Serviços localizados:", len(df_servicos_carac))
+
+                st.caption(
+                    "Os filtros abaixo são extraídos do grupo, classe e partes do nome do serviço. "
+                    "Em serviços com nomes compostos, cada trecho separado por hífen vira uma característica filtrável."
                 )
 
-                col_usar_servico_1, col_usar_servico_2 = st.columns([1, 4])
+                filtros_servico = {}
 
-                with col_usar_servico_1:
-                    if st.button("Usar este CATSER"):
-                        linha_servico = df_servicos_encontrados.iloc[int(indice_servico)]
-                        limpar_session_state_servicos()
-                        st.session_state["codigo_servico_manual"] = int(linha_servico["codigoServico"])
-                        st.session_state["nome_servico_manual"] = str(linha_servico.get("nomeServico", ""))
-                        st.rerun()
+                if not candidatas_servico:
+                    st.warning("Não foram identificadas características estruturáveis nos serviços localizados.")
+                else:
+                    limite_superior_servico = min(20, len(candidatas_servico))
 
-                with col_usar_servico_2:
-                    st.caption(
-                        "Ao usar um CATSER localizado, os preços carregados anteriormente são limpos."
+                    max_filtros_servico = st.slider(
+                        "Quantidade máxima de características de serviço exibidas",
+                        min_value=1,
+                        max_value=limite_superior_servico,
+                        value=min(10, limite_superior_servico),
+                        key="max_filtros_dinamicos_servico"
                     )
 
-                colunas_servico = [
+                    cols_servico = st.columns(3)
+
+                    for i, item in enumerate(candidatas_servico[:max_filtros_servico]):
+                        coluna = item["coluna"]
+                        nome = item["nome"]
+
+                        valores = (
+                            df_servicos_carac[coluna]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .sort_values()
+                            .unique()
+                            .tolist()
+                        )
+
+                        with cols_servico[i % 3]:
+                            selecionados = st.multiselect(
+                                label=f"{nome}",
+                                options=valores,
+                                default=[],
+                                key=f"filtro_servico_{coluna}"
+                            )
+
+                        filtros_servico[coluna] = selecionados
+
+                df_servicos_filtrado = aplicar_filtros_dinamicos(
+                    df_servicos_carac,
+                    filtros_servico
+                )
+
+                st.header("5. CATSERs candidatos após filtros")
+                st.write("CATSERs após filtros:", len(df_servicos_filtrado))
+
+                colunas_servico_base = [
                     "codigoServico",
                     "nomeServico",
                     "codigoClasse",
@@ -1577,17 +1670,63 @@ with aba_principal:
                     "codigoGrupo",
                     "nomeGrupo"
                 ]
+                colunas_servico_carac = [
+                    coluna
+                    for coluna in df_servicos_filtrado.columns
+                    if coluna.startswith("CARAC_")
+                ]
                 colunas_servico = [
                     coluna
-                    for coluna in colunas_servico
-                    if coluna in df_servicos_encontrados.columns
+                    for coluna in colunas_servico_base + colunas_servico_carac
+                    if coluna in df_servicos_filtrado.columns
                 ]
-                st.dataframe(df_servicos_encontrados[colunas_servico], use_container_width=True, hide_index=True)
+
+                st.dataframe(
+                    df_servicos_filtrado[colunas_servico].head(500),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                if df_servicos_filtrado.empty:
+                    st.warning("Nenhum CATSER permaneceu após os filtros.")
+                    df_servicos_selecao = pd.DataFrame()
+                else:
+                    df_servicos_selecao = df_servicos_filtrado.reset_index(drop=True)
+
+                def formatar_opcao_servico(indice):
+                    linha = df_servicos_selecao.iloc[indice]
+                    return (
+                        f"{int(linha['codigoServico'])} - {linha.get('nomeServico', '')} "
+                        f"| Grupo {linha.get('codigoGrupo', '')} - {linha.get('nomeGrupo', '')}"
+                    )
+
+                if not df_servicos_selecao.empty:
+                    indice_servico = st.selectbox(
+                        "Selecione o CATSER filtrado",
+                        options=list(range(len(df_servicos_selecao))),
+                        format_func=formatar_opcao_servico,
+                        key="indice_servico_localizado"
+                    )
+
+                    col_usar_servico_1, col_usar_servico_2 = st.columns([1, 4])
+
+                    with col_usar_servico_1:
+                        if st.button("Usar este CATSER"):
+                            linha_servico = df_servicos_selecao.iloc[int(indice_servico)]
+                            limpar_session_state_servicos()
+                            st.session_state["codigo_servico_manual"] = int(linha_servico["codigoServico"])
+                            st.session_state["nome_servico_manual"] = str(linha_servico.get("nomeServico", ""))
+                            st.rerun()
+
+                    with col_usar_servico_2:
+                        st.caption(
+                            "Ao usar um CATSER filtrado, os preços carregados anteriormente são limpos."
+                        )
 
             with st.expander("Diagnóstico da busca de serviço"):
                 st.json(diagnostico_servicos)
 
-        st.header("2. Confirmar serviço")
+        st.header("6. Confirmar serviço")
 
         col_servico_1, col_servico_2 = st.columns(2)
 
@@ -1609,7 +1748,7 @@ with aba_principal:
             "Para serviços, a consulta usa o código CATSER diretamente, sem etapa de PDM/CATMAT."
         )
 
-        st.header("3. Consulta de preços")
+        st.header("7. Consulta de preços")
 
         col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
 
