@@ -20,10 +20,12 @@ st.set_page_config(
 )
 
 BASE_URL = "https://dadosabertos.compras.gov.br"
+TIPO_MATERIAL = "Produto/material (CATMAT)"
+TIPO_SERVICO = "Serviço (CATSER)"
 
 st.title("PlanejaIA - Consulta de preços públicos")
 st.write(
-    "Consulta de CATMATs e preços praticados em bases públicas para apoio ao planejamento da contratação."
+    "Consulta de CATMAT/CATSER e preços praticados em bases públicas para apoio ao planejamento da contratação."
 )
 
 st.divider()
@@ -81,6 +83,10 @@ def limpar_session_state_precos():
         "urls_precos",
         "df_precos",
         "codigos_catmat_consultados",
+        "codigos_catalogo_consultados",
+        "tipo_catalogo_precos",
+        "coluna_codigo_consultado_precos",
+        "arquivo_csv_precos",
         "data_inicial_precos_final",
         "data_final_precos_final"
     ]:
@@ -97,6 +103,18 @@ def limpar_session_state_catmat():
         "diagnostico_itens",
         "codigo_pdm_atual",
         "nome_pdm_atual"
+    ]:
+        st.session_state.pop(chave, None)
+
+    limpar_session_state_precos()
+
+
+def limpar_session_state_servicos():
+    for chave in [
+        "df_servicos_encontrados",
+        "diagnostico_servicos",
+        "codigo_servico_atual",
+        "nome_servico_atual"
     ]:
         st.session_state.pop(chave, None)
 
@@ -430,6 +448,208 @@ def localizar_pdms_por_termo(df_pdms, termo, limite=50):
     )
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_catalogo_servicos(somente_ativos=True, max_paginas=10, tamanho_pagina=500):
+    params = {}
+
+    if somente_ativos:
+        params["statusServico"] = True
+
+    def consultar_pagina_servico(pagina):
+        params_pagina = dict(params)
+        params_pagina["pagina"] = int(pagina)
+        params_pagina["tamanhoPagina"] = int(tamanho_pagina)
+
+        try:
+            response = consultar_endpoint(
+                endpoint="/modulo-servico/6_consultarItemServico",
+                params=params_pagina,
+                timeout=15
+            )
+
+            if response.status_code != 200:
+                return {
+                    "resultado": [],
+                    "total_registros": None,
+                    "total_paginas": None,
+                    "url": response.url,
+                    "erro": {
+                        "pagina": pagina,
+                        "status": response.status_code,
+                        "mensagem": response.text,
+                        "url": response.url
+                    }
+                }
+
+            data = response.json()
+
+            return {
+                "resultado": data.get("resultado", []),
+                "total_registros": data.get("totalRegistros"),
+                "total_paginas": data.get("totalPaginas"),
+                "url": response.url,
+                "erro": None
+            }
+
+        except Exception as e:
+            return {
+                "resultado": [],
+                "total_registros": None,
+                "total_paginas": None,
+                "url": f"{BASE_URL}/modulo-servico/6_consultarItemServico",
+                "erro": {
+                    "pagina": pagina,
+                    "status": "erro",
+                    "mensagem": str(e),
+                    "url": f"{BASE_URL}/modulo-servico/6_consultarItemServico"
+                }
+            }
+
+    primeira_pagina = consultar_pagina_servico(1)
+    resultados = list(primeira_pagina["resultado"])
+    erros = []
+    urls = [primeira_pagina["url"]]
+    total_registros = primeira_pagina["total_registros"]
+    total_paginas = primeira_pagina["total_paginas"]
+
+    if primeira_pagina["erro"]:
+        erros.append(primeira_pagina["erro"])
+
+    paginas_a_consultar = []
+
+    if not erros:
+        try:
+            paginas_disponiveis = int(total_paginas) if total_paginas is not None else int(max_paginas)
+        except Exception:
+            paginas_disponiveis = int(max_paginas)
+
+        total_paginas_consulta = min(paginas_disponiveis, int(max_paginas))
+        paginas_a_consultar = list(range(2, total_paginas_consulta + 1))
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futuros = {
+            executor.submit(consultar_pagina_servico, pagina): pagina
+            for pagina in paginas_a_consultar
+        }
+
+        for futuro in as_completed(futuros):
+            retorno = futuro.result()
+            resultados.extend(retorno["resultado"])
+            urls.append(retorno["url"])
+
+            if retorno["erro"]:
+                erros.append(retorno["erro"])
+
+    df = pd.DataFrame(resultados)
+
+    if not df.empty and "codigoServico" in df.columns:
+        df = (
+            df
+            .dropna(subset=["codigoServico"])
+            .drop_duplicates(subset=["codigoServico"])
+            .sort_values(["nomeServico", "codigoServico"], na_position="last")
+            .reset_index(drop=True)
+        )
+
+    diagnostico = {
+        "total_registros_api": total_registros,
+        "total_paginas_api": total_paginas,
+        "quantidade_carregada": int(len(df)),
+        "erros": erros,
+        "urls": urls
+    }
+
+    return df, diagnostico
+
+
+def localizar_servicos_por_termo(df_servicos, termo, limite=50):
+    if df_servicos is None or df_servicos.empty:
+        return pd.DataFrame()
+
+    termo_normalizado = normalizar_texto(termo)
+    tokens = [
+        token
+        for token in termo_normalizado.split()
+        if len(token) >= 2
+    ]
+
+    if not tokens:
+        return pd.DataFrame()
+
+    df_busca = df_servicos.copy()
+
+    for coluna in ["nomeServico", "nomeClasse", "nomeGrupo", "nomeDivisao", "nomeSecao"]:
+        if coluna not in df_busca.columns:
+            df_busca[coluna] = ""
+
+        df_busca[f"{coluna}_normalizado"] = df_busca[coluna].apply(normalizar_texto)
+
+    texto_busca = (
+        df_busca["nomeServico_normalizado"]
+        + " "
+        + df_busca["nomeClasse_normalizado"]
+        + " "
+        + df_busca["nomeGrupo_normalizado"]
+        + " "
+        + df_busca["nomeDivisao_normalizado"]
+        + " "
+        + df_busca["nomeSecao_normalizado"]
+    )
+
+    mask = texto_busca.apply(
+        lambda texto: all(token in texto for token in tokens)
+    )
+
+    encontrados = df_busca[mask].copy()
+
+    if encontrados.empty:
+        return encontrados
+
+    def calcular_pontuacao(linha):
+        nome_servico = linha["nomeServico_normalizado"]
+        nome_classe = linha["nomeClasse_normalizado"]
+        nome_grupo = linha["nomeGrupo_normalizado"]
+
+        if nome_servico == termo_normalizado:
+            return 0
+
+        if nome_servico.startswith(termo_normalizado):
+            return 1
+
+        if all(token in nome_servico for token in tokens):
+            return 2
+
+        if all(token in nome_classe for token in tokens):
+            return 3
+
+        if all(token in nome_grupo for token in tokens):
+            return 4
+
+        return 5
+
+    encontrados["pontuacao_busca"] = encontrados.apply(calcular_pontuacao, axis=1)
+    encontrados["tamanho_nome_servico"] = encontrados["nomeServico"].fillna("").astype(str).str.len()
+
+    colunas_exibir = [
+        "codigoServico",
+        "nomeServico",
+        "codigoClasse",
+        "nomeClasse",
+        "codigoGrupo",
+        "nomeGrupo",
+        "statusServico",
+        "dataHoraAtualizacao"
+    ]
+    colunas_exibir = [coluna for coluna in colunas_exibir if coluna in encontrados.columns]
+
+    return (
+        encontrados
+        .sort_values(["pontuacao_busca", "tamanho_nome_servico", "nomeServico"], na_position="last")
+        .head(int(limite))[colunas_exibir]
+        .reset_index(drop=True)
+    )
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def carregar_itens_por_pdm(
     codigo_pdm,
@@ -529,43 +749,55 @@ def carregar_itens_por_pdm(
     )
 
 
-def consultar_precos_multiplos_catmats(
-    codigos_catmat,
+def consultar_precos_multiplos_itens_catalogo(
+    codigos_itens,
     data_inicial,
     data_final,
-    max_paginas_por_catmat=2,
+    tipo_catalogo="material",
+    max_paginas_por_item=2,
     tamanho_pagina=50
 ):
     todos_resultados = []
     todos_erros = []
     urls = []
 
-    total = len(codigos_catmat)
+    total = len(codigos_itens)
 
     if total == 0:
         return todos_resultados, todos_erros, urls
 
+    if tipo_catalogo == "servico":
+        endpoint = "/modulo-pesquisa-preco/3_consultarServico"
+        data_inicio_param = "dataCompraInicio"
+        data_fim_param = "dataCompraFim"
+        coluna_codigo_consultado = "catser_consultado"
+    else:
+        endpoint = "/modulo-pesquisa-preco/1_consultarMaterial"
+        data_inicio_param = "dataCompraMin"
+        data_fim_param = "dataCompraMax"
+        coluna_codigo_consultado = "catmat_consultado"
+
     progresso = st.progress(0)
 
-    for i, codigo in enumerate(codigos_catmat):
+    for i, codigo in enumerate(codigos_itens):
         params_base = {
             "codigoItemCatalogo": int(codigo),
-            "dataCompraMin": data_inicial.strftime("%Y-%m-%d"),
-            "dataCompraMax": data_final.strftime("%Y-%m-%d")
+            data_inicio_param: data_inicial.strftime("%Y-%m-%d"),
+            data_fim_param: data_final.strftime("%Y-%m-%d")
         }
 
         resultados, erros, _, _, urls_consultadas = consultar_paginas(
-            endpoint="/modulo-pesquisa-preco/1_consultarMaterial",
+            endpoint=endpoint,
             params_base=params_base,
             tamanho_pagina=int(tamanho_pagina),
-            max_paginas=int(max_paginas_por_catmat),
+            max_paginas=int(max_paginas_por_item),
             timeout=120,
             tentativas_por_pagina=3,
             pular_pagina_com_erro=True
         )
 
         for item in resultados:
-            item["catmat_consultado"] = int(codigo)
+            item[coluna_codigo_consultado] = int(codigo)
 
         todos_resultados.extend(resultados)
         todos_erros.extend(erros)
@@ -575,6 +807,23 @@ def consultar_precos_multiplos_catmats(
         time.sleep(0.2)
 
     return todos_resultados, todos_erros, urls
+
+
+def consultar_precos_multiplos_catmats(
+    codigos_catmat,
+    data_inicial,
+    data_final,
+    max_paginas_por_catmat=2,
+    tamanho_pagina=50
+):
+    return consultar_precos_multiplos_itens_catalogo(
+        codigos_itens=codigos_catmat,
+        data_inicial=data_inicial,
+        data_final=data_final,
+        tipo_catalogo="material",
+        max_paginas_por_item=max_paginas_por_catmat,
+        tamanho_pagina=tamanho_pagina
+    )
 
 
 # ============================================================
@@ -781,7 +1030,7 @@ def exibir_estatisticas_precos(df):
 # ============================================================
 
 aba_principal, aba_direta = st.tabs([
-    "Consulta assistida por PDM",
+    "Consulta assistida por catálogo",
     "Consulta direta por CATMAT"
 ])
 
@@ -791,420 +1040,654 @@ aba_principal, aba_direta = st.tabs([
 # ============================================================
 
 with aba_principal:
-    st.session_state.setdefault("codigo_pdm_manual", 8435)
-    st.session_state.setdefault("nome_pdm_manual", "Notebook")
-
-    st.header("1. Localizar PDM")
-
-    col_busca_pdm_1, col_busca_pdm_2, col_busca_pdm_3 = st.columns([3, 1, 1])
-
-    with col_busca_pdm_1:
-        termo_busca_pdm = st.text_input(
-            "Buscar PDM por nome, classe ou grupo",
-            value="notebook",
-            placeholder="Ex.: notebook, monitor, impressora, licença",
-            key="termo_busca_pdm"
-        )
-
-    with col_busca_pdm_2:
-        limite_resultados_pdm = st.number_input(
-            "Resultados",
-            min_value=5,
-            max_value=100,
-            value=25,
-            step=5,
-            key="limite_resultados_pdm"
-        )
-
-    with col_busca_pdm_3:
-        st.write("")
-        st.write("")
-        buscar_pdm = st.button("Buscar PDM")
-
-    if buscar_pdm:
-        if len(normalizar_texto(termo_busca_pdm)) < 2:
-            st.session_state.pop("df_pdms_encontrados", None)
-            st.session_state.pop("diagnostico_pdms", None)
-            st.warning("Informe pelo menos dois caracteres para buscar PDM.")
-        else:
-            with st.spinner("Carregando catálogo de PDMs e filtrando resultados..."):
-                df_catalogo_pdms, diagnostico_pdms = carregar_catalogo_pdms(
-                    somente_ativos=True,
-                    max_paginas=40,
-                    tamanho_pagina=500
-                )
-
-                df_pdms_encontrados = localizar_pdms_por_termo(
-                    df_catalogo_pdms,
-                    termo_busca_pdm,
-                    limite=int(limite_resultados_pdm)
-                )
-
-            st.session_state["df_pdms_encontrados"] = df_pdms_encontrados
-            st.session_state["diagnostico_pdms"] = diagnostico_pdms
-
-    df_pdms_encontrados = st.session_state.get("df_pdms_encontrados")
-
-    if df_pdms_encontrados is not None:
-        diagnostico_pdms = st.session_state.get("diagnostico_pdms", {})
-
-        if df_pdms_encontrados.empty:
-            if diagnostico_pdms.get("erros"):
-                st.error("Não foi possível carregar o catálogo de PDMs na API do Compras.gov.br.")
-            else:
-                st.warning("Nenhum PDM encontrado para o termo informado.")
-        else:
-            st.success(f"{len(df_pdms_encontrados)} PDM(s) encontrado(s).")
-
-            def formatar_opcao_pdm(indice):
-                linha = df_pdms_encontrados.iloc[indice]
-                return (
-                    f"{int(linha['codigoPdm'])} - {linha.get('nomePdm', '')} "
-                    f"| Classe {linha.get('codigoClasse', '')} - {linha.get('nomeClasse', '')}"
-                )
-
-            indice_pdm = st.selectbox(
-                "Selecione o PDM localizado",
-                options=list(range(len(df_pdms_encontrados))),
-                format_func=formatar_opcao_pdm,
-                key="indice_pdm_localizado"
-            )
-
-            col_usar_pdm_1, col_usar_pdm_2 = st.columns([1, 4])
-
-            with col_usar_pdm_1:
-                if st.button("Usar este PDM"):
-                    linha_pdm = df_pdms_encontrados.iloc[int(indice_pdm)]
-                    limpar_session_state_catmat()
-                    st.session_state["codigo_pdm_manual"] = int(linha_pdm["codigoPdm"])
-                    st.session_state["nome_pdm_manual"] = str(linha_pdm.get("nomePdm", ""))
-                    st.rerun()
-
-            with col_usar_pdm_2:
-                st.caption(
-                    "Ao usar um PDM localizado, os CATMATs e preços carregados anteriormente são limpos."
-                )
-
-            colunas_pdm = [
-                "codigoPdm",
-                "nomePdm",
-                "codigoClasse",
-                "nomeClasse",
-                "codigoGrupo",
-                "nomeGrupo"
-            ]
-            colunas_pdm = [coluna for coluna in colunas_pdm if coluna in df_pdms_encontrados.columns]
-            st.dataframe(df_pdms_encontrados[colunas_pdm], use_container_width=True, hide_index=True)
-
-        with st.expander("Diagnóstico da busca de PDM"):
-            st.json(diagnostico_pdms)
-
-    st.header("2. Confirmar PDM")
-
-    col_pdm_1, col_pdm_2 = st.columns(2)
-
-    with col_pdm_1:
-        codigo_pdm = st.number_input(
-            "Código PDM",
-            min_value=1,
-            step=1,
-            key="codigo_pdm_manual"
-        )
-
-    with col_pdm_2:
-        nome_pdm_informado = st.text_input(
-            "Nome do PDM, opcional",
-            key="nome_pdm_manual"
-        )
-
-    st.caption(
-        "Você pode usar o localizador acima ou informar o código manualmente. "
-        "Exemplo: Notebook = 8435; Tesoura = 249."
+    tipo_catalogo = st.radio(
+        "Filtrar por",
+        options=[TIPO_MATERIAL, TIPO_SERVICO],
+        horizontal=True,
+        key="tipo_catalogo_principal"
     )
 
-    st.header("3. Carregar CATMATs do PDM")
-
-    col_catmat_1, col_catmat_2, col_catmat_3 = st.columns(3)
-
-    with col_catmat_1:
-        somente_ativos = st.checkbox("Somente CATMATs ativos", value=True)
-
-    with col_catmat_2:
-        max_paginas_catmat = st.number_input(
-            "Máximo de páginas de CATMAT",
-            min_value=1,
-            max_value=30,
-            value=5,
-            step=1
-        )
-
-    with col_catmat_3:
-        tamanho_pagina_catmat = st.number_input(
-            "Registros por página no CATMAT",
-            min_value=5,
-            max_value=50,
-            value=10,
-            step=5
-        )
-
-    if st.button("Carregar CATMATs do PDM"):
+    if st.session_state.get("tipo_catalogo_principal_anterior") != tipo_catalogo:
         limpar_session_state_catmat()
+        limpar_session_state_servicos()
+        st.session_state.pop("df_pdms_encontrados", None)
+        st.session_state.pop("diagnostico_pdms", None)
+        st.session_state.pop("df_servicos_encontrados", None)
+        st.session_state.pop("diagnostico_servicos", None)
+        st.session_state["tipo_catalogo_principal_anterior"] = tipo_catalogo
 
-        with st.spinner("Consultando CATMATs do PDM informado..."):
-            (
-                df_itens,
-                erros_itens,
-                total_itens,
-                paginas_itens,
-                urls_itens,
-                diagnostico_itens
-            ) = carregar_itens_por_pdm(
-                codigo_pdm=int(codigo_pdm),
-                somente_ativos=somente_ativos,
-                max_paginas=int(max_paginas_catmat),
-                tamanho_pagina=int(tamanho_pagina_catmat)
+    st.session_state.setdefault("codigo_pdm_manual", 8435)
+    st.session_state.setdefault("nome_pdm_manual", "Notebook")
+    st.session_state.setdefault("codigo_servico_manual", 27782)
+    st.session_state.setdefault(
+        "nome_servico_manual",
+        "PRESTACAO DE SERVICO DE LIMPEZA E CONSERVACAO"
+    )
+
+    if tipo_catalogo == TIPO_SERVICO:
+        try:
+            codigo_servico_atual = int(st.session_state.get("codigo_servico_manual", 0))
+        except Exception:
+            codigo_servico_atual = 0
+
+        if codigo_servico_atual <= 1:
+            st.session_state["codigo_servico_manual"] = 27782
+
+        if not str(st.session_state.get("nome_servico_manual", "")).strip():
+            st.session_state["nome_servico_manual"] = "PRESTACAO DE SERVICO DE LIMPEZA E CONSERVACAO"
+
+    if tipo_catalogo == TIPO_MATERIAL:
+        st.header("1. Localizar PDM")
+
+        col_busca_pdm_1, col_busca_pdm_2, col_busca_pdm_3 = st.columns([3, 1, 1])
+
+        with col_busca_pdm_1:
+            termo_busca_pdm = st.text_input(
+                "Buscar PDM por nome, classe ou grupo",
+                value="notebook",
+                placeholder="Ex.: notebook, monitor, impressora, licença",
+                key="termo_busca_pdm"
             )
 
-        df_itens_carac = criar_tabela_caracteristicas(df_itens)
-
-        st.session_state["codigo_pdm_atual"] = int(codigo_pdm)
-        st.session_state["nome_pdm_atual"] = nome_pdm_informado
-        st.session_state["df_itens_carac"] = df_itens_carac
-        st.session_state["erros_itens"] = erros_itens
-        st.session_state["total_itens"] = total_itens
-        st.session_state["paginas_itens"] = paginas_itens
-        st.session_state["urls_itens"] = urls_itens
-        st.session_state["diagnostico_itens"] = diagnostico_itens
-
-    if "df_itens_carac" in st.session_state:
-        df_itens_carac = st.session_state["df_itens_carac"]
-        erros_itens = st.session_state.get("erros_itens", [])
-        total_itens = st.session_state.get("total_itens")
-        paginas_itens = st.session_state.get("paginas_itens")
-        urls_itens = st.session_state.get("urls_itens", [])
-        diagnostico_itens = st.session_state.get("diagnostico_itens", {})
-
-        st.header("4. Filtros dinâmicos por características do PDM")
-
-        st.write("Total de CATMATs informado pela API:", total_itens)
-        st.write("Total de páginas informado pela API:", paginas_itens)
-        st.write("CATMATs carregados no app:", len(df_itens_carac))
-
-        with st.expander("Diagnóstico da consulta de CATMAT"):
-            st.write("Colunas retornadas/criadas:")
-            st.write(list(df_itens_carac.columns))
-            st.write("URLs consultadas:")
-            st.write(urls_itens)
-
-            if diagnostico_itens:
-                st.write("Diagnóstico consolidado:")
-                st.json(diagnostico_itens)
-
-            if not df_itens_carac.empty:
-                st.dataframe(df_itens_carac.head(20), use_container_width=True)
-
-        if erros_itens:
-            st.warning("A consulta de CATMAT retornou erro em uma ou mais páginas.")
-            st.json(erros_itens)
-
-        if df_itens_carac.empty:
-            if diagnostico_itens.get("consulta_teve_erro"):
-                st.error(
-                    "A API do Compras.gov.br retornou erro ao consultar os CATMATs deste PDM. "
-                    "Isso não significa que o PDM não possua CATMATs."
-                )
-
-                st.info(
-                    "Reduza a quantidade de páginas, use poucos registros por página ou tente novamente em outro momento."
-                )
-
-                with st.expander("Diagnóstico técnico da consulta"):
-                    st.json(diagnostico_itens)
-
-            else:
-                st.warning(
-                    "Nenhum CATMAT foi retornado para o PDM informado."
-                )
-
-                with st.expander("Diagnóstico da consulta"):
-                    st.json(diagnostico_itens)
-
-        else:
-            candidatas = identificar_colunas_caracteristicas(df_itens_carac)
-
-            st.caption(
-                "Os filtros abaixo são extraídos automaticamente da descrição dos CATMATs do PDM informado. "
-                "Esta é uma extração textual heurística."
+        with col_busca_pdm_2:
+            limite_resultados_pdm = st.number_input(
+                "Resultados",
+                min_value=5,
+                max_value=100,
+                value=25,
+                step=5,
+                key="limite_resultados_pdm"
             )
 
-            filtros = {}
+        with col_busca_pdm_3:
+            st.write("")
+            st.write("")
+            buscar_pdm = st.button("Buscar PDM")
 
-            if not candidatas:
-                st.warning("Não foram identificadas características estruturáveis na descrição dos itens.")
+        if buscar_pdm:
+            if len(normalizar_texto(termo_busca_pdm)) < 2:
+                st.session_state.pop("df_pdms_encontrados", None)
+                st.session_state.pop("diagnostico_pdms", None)
+                st.warning("Informe pelo menos dois caracteres para buscar PDM.")
             else:
-                limite_superior = min(20, len(candidatas))
+                with st.spinner("Carregando catálogo de PDMs e filtrando resultados..."):
+                    df_catalogo_pdms, diagnostico_pdms = carregar_catalogo_pdms(
+                        somente_ativos=True,
+                        max_paginas=40,
+                        tamanho_pagina=500
+                    )
 
-                max_filtros = st.slider(
-                    "Quantidade máxima de características exibidas",
-                    min_value=1,
-                    max_value=limite_superior,
-                    value=min(10, limite_superior),
-                    key="max_filtros_dinamicos"
+                    df_pdms_encontrados = localizar_pdms_por_termo(
+                        df_catalogo_pdms,
+                        termo_busca_pdm,
+                        limite=int(limite_resultados_pdm)
+                    )
+
+                st.session_state["df_pdms_encontrados"] = df_pdms_encontrados
+                st.session_state["diagnostico_pdms"] = diagnostico_pdms
+
+        df_pdms_encontrados = st.session_state.get("df_pdms_encontrados")
+
+        if df_pdms_encontrados is not None:
+            diagnostico_pdms = st.session_state.get("diagnostico_pdms", {})
+
+            if df_pdms_encontrados.empty:
+                if diagnostico_pdms.get("erros"):
+                    st.error("Não foi possível carregar o catálogo de PDMs na API do Compras.gov.br.")
+                else:
+                    st.warning("Nenhum PDM encontrado para o termo informado.")
+            else:
+                st.success(f"{len(df_pdms_encontrados)} PDM(s) encontrado(s).")
+
+                def formatar_opcao_pdm(indice):
+                    linha = df_pdms_encontrados.iloc[indice]
+                    return (
+                        f"{int(linha['codigoPdm'])} - {linha.get('nomePdm', '')} "
+                        f"| Classe {linha.get('codigoClasse', '')} - {linha.get('nomeClasse', '')}"
+                    )
+
+                indice_pdm = st.selectbox(
+                    "Selecione o PDM localizado",
+                    options=list(range(len(df_pdms_encontrados))),
+                    format_func=formatar_opcao_pdm,
+                    key="indice_pdm_localizado"
                 )
 
-                cols = st.columns(3)
+                col_usar_pdm_1, col_usar_pdm_2 = st.columns([1, 4])
 
-                for i, item in enumerate(candidatas[:max_filtros]):
-                    coluna = item["coluna"]
-                    nome = item["nome"]
+                with col_usar_pdm_1:
+                    if st.button("Usar este PDM"):
+                        linha_pdm = df_pdms_encontrados.iloc[int(indice_pdm)]
+                        limpar_session_state_catmat()
+                        st.session_state["codigo_pdm_manual"] = int(linha_pdm["codigoPdm"])
+                        st.session_state["nome_pdm_manual"] = str(linha_pdm.get("nomePdm", ""))
+                        st.rerun()
 
-                    valores = (
-                        df_itens_carac[coluna]
+                with col_usar_pdm_2:
+                    st.caption(
+                        "Ao usar um PDM localizado, os CATMATs e preços carregados anteriormente são limpos."
+                    )
+
+                colunas_pdm = [
+                    "codigoPdm",
+                    "nomePdm",
+                    "codigoClasse",
+                    "nomeClasse",
+                    "codigoGrupo",
+                    "nomeGrupo"
+                ]
+                colunas_pdm = [coluna for coluna in colunas_pdm if coluna in df_pdms_encontrados.columns]
+                st.dataframe(df_pdms_encontrados[colunas_pdm], use_container_width=True, hide_index=True)
+
+            with st.expander("Diagnóstico da busca de PDM"):
+                st.json(diagnostico_pdms)
+
+        st.header("2. Confirmar PDM")
+
+        col_pdm_1, col_pdm_2 = st.columns(2)
+
+        with col_pdm_1:
+            codigo_pdm = st.number_input(
+                "Código PDM",
+                min_value=1,
+                step=1,
+                key="codigo_pdm_manual"
+            )
+
+        with col_pdm_2:
+            nome_pdm_informado = st.text_input(
+                "Nome do PDM, opcional",
+                key="nome_pdm_manual"
+            )
+
+        st.caption(
+            "Você pode usar o localizador acima ou informar o código manualmente. "
+            "Exemplo: Notebook = 8435; Tesoura = 249."
+        )
+
+        st.header("3. Carregar CATMATs do PDM")
+
+        col_catmat_1, col_catmat_2, col_catmat_3 = st.columns(3)
+
+        with col_catmat_1:
+            somente_ativos = st.checkbox("Somente CATMATs ativos", value=True)
+
+        with col_catmat_2:
+            max_paginas_catmat = st.number_input(
+                "Máximo de páginas de CATMAT",
+                min_value=1,
+                max_value=30,
+                value=5,
+                step=1
+            )
+
+        with col_catmat_3:
+            tamanho_pagina_catmat = st.number_input(
+                "Registros por página no CATMAT",
+                min_value=5,
+                max_value=50,
+                value=10,
+                step=5
+            )
+
+        if st.button("Carregar CATMATs do PDM"):
+            limpar_session_state_catmat()
+
+            with st.spinner("Consultando CATMATs do PDM informado..."):
+                (
+                    df_itens,
+                    erros_itens,
+                    total_itens,
+                    paginas_itens,
+                    urls_itens,
+                    diagnostico_itens
+                ) = carregar_itens_por_pdm(
+                    codigo_pdm=int(codigo_pdm),
+                    somente_ativos=somente_ativos,
+                    max_paginas=int(max_paginas_catmat),
+                    tamanho_pagina=int(tamanho_pagina_catmat)
+                )
+
+            df_itens_carac = criar_tabela_caracteristicas(df_itens)
+
+            st.session_state["codigo_pdm_atual"] = int(codigo_pdm)
+            st.session_state["nome_pdm_atual"] = nome_pdm_informado
+            st.session_state["df_itens_carac"] = df_itens_carac
+            st.session_state["erros_itens"] = erros_itens
+            st.session_state["total_itens"] = total_itens
+            st.session_state["paginas_itens"] = paginas_itens
+            st.session_state["urls_itens"] = urls_itens
+            st.session_state["diagnostico_itens"] = diagnostico_itens
+
+        if "df_itens_carac" in st.session_state:
+            df_itens_carac = st.session_state["df_itens_carac"]
+            erros_itens = st.session_state.get("erros_itens", [])
+            total_itens = st.session_state.get("total_itens")
+            paginas_itens = st.session_state.get("paginas_itens")
+            urls_itens = st.session_state.get("urls_itens", [])
+            diagnostico_itens = st.session_state.get("diagnostico_itens", {})
+
+            st.header("4. Filtros dinâmicos por características do PDM")
+
+            st.write("Total de CATMATs informado pela API:", total_itens)
+            st.write("Total de páginas informado pela API:", paginas_itens)
+            st.write("CATMATs carregados no app:", len(df_itens_carac))
+
+            with st.expander("Diagnóstico da consulta de CATMAT"):
+                st.write("Colunas retornadas/criadas:")
+                st.write(list(df_itens_carac.columns))
+                st.write("URLs consultadas:")
+                st.write(urls_itens)
+
+                if diagnostico_itens:
+                    st.write("Diagnóstico consolidado:")
+                    st.json(diagnostico_itens)
+
+                if not df_itens_carac.empty:
+                    st.dataframe(df_itens_carac.head(20), use_container_width=True)
+
+            if erros_itens:
+                st.warning("A consulta de CATMAT retornou erro em uma ou mais páginas.")
+                st.json(erros_itens)
+
+            if df_itens_carac.empty:
+                if diagnostico_itens.get("consulta_teve_erro"):
+                    st.error(
+                        "A API do Compras.gov.br retornou erro ao consultar os CATMATs deste PDM. "
+                        "Isso não significa que o PDM não possua CATMATs."
+                    )
+
+                    st.info(
+                        "Reduza a quantidade de páginas, use poucos registros por página ou tente novamente em outro momento."
+                    )
+
+                    with st.expander("Diagnóstico técnico da consulta"):
+                        st.json(diagnostico_itens)
+
+                else:
+                    st.warning("Nenhum CATMAT foi retornado para o PDM informado.")
+
+                    with st.expander("Diagnóstico da consulta"):
+                        st.json(diagnostico_itens)
+
+            else:
+                candidatas = identificar_colunas_caracteristicas(df_itens_carac)
+
+                st.caption(
+                    "Os filtros abaixo são extraídos automaticamente da descrição dos CATMATs do PDM informado. "
+                    "Esta é uma extração textual heurística."
+                )
+
+                filtros = {}
+
+                if not candidatas:
+                    st.warning("Não foram identificadas características estruturáveis na descrição dos itens.")
+                else:
+                    limite_superior = min(20, len(candidatas))
+
+                    max_filtros = st.slider(
+                        "Quantidade máxima de características exibidas",
+                        min_value=1,
+                        max_value=limite_superior,
+                        value=min(10, limite_superior),
+                        key="max_filtros_dinamicos"
+                    )
+
+                    cols = st.columns(3)
+
+                    for i, item in enumerate(candidatas[:max_filtros]):
+                        coluna = item["coluna"]
+                        nome = item["nome"]
+
+                        valores = (
+                            df_itens_carac[coluna]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .sort_values()
+                            .unique()
+                            .tolist()
+                        )
+
+                        with cols[i % 3]:
+                            selecionados = st.multiselect(
+                                label=f"{nome}",
+                                options=valores,
+                                default=[],
+                                key=f"filtro_{st.session_state.get('codigo_pdm_atual')}_{coluna}"
+                            )
+
+                        filtros[coluna] = selecionados
+
+                df_filtrado = aplicar_filtros_dinamicos(df_itens_carac, filtros)
+
+                st.header("5. CATMATs candidatos após filtros")
+                st.write("CATMATs após filtros:", len(df_filtrado))
+
+                colunas_base = [
+                    "codigoItem",
+                    "nomePdm",
+                    "descricaoItem",
+                    "statusItem",
+                    "itemSustentavel",
+                    "dataHoraAtualizacao"
+                ]
+
+                colunas_carac = [c for c in df_filtrado.columns if c.startswith("CARAC_")]
+                colunas_exibir = [
+                    c for c in colunas_base + colunas_carac if c in df_filtrado.columns
+                ]
+
+                if colunas_exibir:
+                    st.dataframe(df_filtrado[colunas_exibir].head(500), use_container_width=True)
+                else:
+                    st.dataframe(df_filtrado.head(500), use_container_width=True)
+
+                codigo_item_col = primeira_coluna_existente(
+                    df_filtrado,
+                    ["codigoItem", "codigo_item", "codItem", "idItem"]
+                )
+
+                if df_filtrado.empty:
+                    st.warning("Nenhum CATMAT permaneceu após os filtros.")
+                elif codigo_item_col is None:
+                    st.error("Não foi possível identificar a coluna de código CATMAT.")
+                else:
+                    codigos_disponiveis = (
+                        df_filtrado[codigo_item_col]
                         .dropna()
-                        .astype(str)
-                        .str.strip()
-                        .sort_values()
-                        .unique()
+                        .astype(int)
+                        .drop_duplicates()
                         .tolist()
                     )
 
-                    with cols[i % 3]:
-                        selecionados = st.multiselect(
-                            label=f"{nome}",
-                            options=valores,
-                            default=[],
-                            key=f"filtro_{st.session_state.get('codigo_pdm_atual')}_{coluna}"
+                    max_default = min(10, len(codigos_disponiveis))
+                    codigos_default = codigos_disponiveis[:max_default]
+
+                    codigos_selecionados = st.multiselect(
+                        "Selecione os CATMATs para consulta de preços",
+                        options=codigos_disponiveis,
+                        default=codigos_default,
+                        key="codigos_catmat_selecionados"
+                    )
+
+                    st.header("6. Consulta de preços")
+
+                    col_preco_1, col_preco_2, col_preco_3, col_preco_4 = st.columns(4)
+
+                    with col_preco_1:
+                        data_inicial = st.date_input(
+                            "Data inicial",
+                            value=date(2024, 1, 1),
+                            key="data_inicial_precos"
                         )
 
-                    filtros[coluna] = selecionados
+                    with col_preco_2:
+                        data_final = st.date_input(
+                            "Data final",
+                            value=date.today(),
+                            key="data_final_precos"
+                        )
 
-            df_filtrado = aplicar_filtros_dinamicos(df_itens_carac, filtros)
+                    with col_preco_3:
+                        max_paginas_preco = st.number_input(
+                            "Máximo de páginas por CATMAT",
+                            min_value=1,
+                            max_value=10,
+                            value=2,
+                            step=1,
+                            key="max_paginas_preco"
+                        )
 
-            st.header("5. CATMATs candidatos após filtros")
-            st.write("CATMATs após filtros:", len(df_filtrado))
+                    with col_preco_4:
+                        tamanho_pagina_preco = st.number_input(
+                            "Registros por página em preços",
+                            min_value=10,
+                            max_value=100,
+                            value=50,
+                            step=10,
+                            key="tamanho_pagina_preco"
+                        )
 
-            colunas_base = [
-                "codigoItem",
-                "nomePdm",
-                "descricaoItem",
-                "statusItem",
-                "itemSustentavel",
-                "dataHoraAtualizacao"
-            ]
+                    if st.button("Consultar preços dos CATMATs selecionados"):
+                        limpar_session_state_precos()
 
-            colunas_carac = [c for c in df_filtrado.columns if c.startswith("CARAC_")]
-            colunas_exibir = [
-                c for c in colunas_base + colunas_carac if c in df_filtrado.columns
-            ]
+                        if not codigos_selecionados:
+                            st.warning("Selecione pelo menos um CATMAT.")
+                        else:
+                            with st.spinner("Consultando preços praticados..."):
+                                resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
+                                    codigos_itens=codigos_selecionados,
+                                    data_inicial=data_inicial,
+                                    data_final=data_final,
+                                    tipo_catalogo="material",
+                                    max_paginas_por_item=int(max_paginas_preco),
+                                    tamanho_pagina=int(tamanho_pagina_preco)
+                                )
 
-            if colunas_exibir:
-                st.dataframe(
-                    df_filtrado[colunas_exibir].head(500),
-                    use_container_width=True
-                )
-            else:
-                st.dataframe(
-                    df_filtrado.head(500),
-                    use_container_width=True
-                )
+                            st.session_state["resultados_precos"] = resultados_precos
+                            st.session_state["erros_precos"] = erros_precos
+                            st.session_state["urls_precos"] = urls_precos
+                            st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
+                            st.session_state["codigos_catmat_consultados"] = codigos_selecionados
+                            st.session_state["codigos_catalogo_consultados"] = codigos_selecionados
+                            st.session_state["tipo_catalogo_precos"] = "CATMAT"
+                            st.session_state["coluna_codigo_consultado_precos"] = "catmat_consultado"
+                            st.session_state["arquivo_csv_precos"] = "precos_consolidados_catmat.csv"
+                            st.session_state["data_inicial_precos_final"] = data_inicial
+                            st.session_state["data_final_precos_final"] = data_final
 
-            codigo_item_col = primeira_coluna_existente(
-                df_filtrado,
-                ["codigoItem", "codigo_item", "codItem", "idItem"]
+    else:
+        st.header("1. Localizar serviço")
+
+        col_busca_servico_1, col_busca_servico_2, col_busca_servico_3 = st.columns([3, 1, 1])
+
+        with col_busca_servico_1:
+            termo_busca_servico = st.text_input(
+                "Buscar serviço por nome, classe ou grupo",
+                value="limpeza",
+                placeholder="Ex.: limpeza, suporte, manutenção, consultoria",
+                key="termo_busca_servico"
             )
 
-            if df_filtrado.empty:
-                st.warning("Nenhum CATMAT permaneceu após os filtros.")
-            elif codigo_item_col is None:
-                st.error("Não foi possível identificar a coluna de código CATMAT.")
+        with col_busca_servico_2:
+            limite_resultados_servico = st.number_input(
+                "Resultados",
+                min_value=5,
+                max_value=100,
+                value=25,
+                step=5,
+                key="limite_resultados_servico"
+            )
+
+        with col_busca_servico_3:
+            st.write("")
+            st.write("")
+            buscar_servico = st.button("Buscar serviço")
+
+        if buscar_servico:
+            if len(normalizar_texto(termo_busca_servico)) < 2:
+                st.session_state.pop("df_servicos_encontrados", None)
+                st.session_state.pop("diagnostico_servicos", None)
+                st.warning("Informe pelo menos dois caracteres para buscar serviço.")
             else:
-                codigos_disponiveis = (
-                    df_filtrado[codigo_item_col]
-                    .dropna()
-                    .astype(int)
-                    .drop_duplicates()
-                    .tolist()
+                with st.spinner("Carregando catálogo de serviços e filtrando resultados..."):
+                    df_catalogo_servicos, diagnostico_servicos = carregar_catalogo_servicos(
+                        somente_ativos=True,
+                        max_paginas=10,
+                        tamanho_pagina=500
+                    )
+
+                    df_servicos_encontrados = localizar_servicos_por_termo(
+                        df_catalogo_servicos,
+                        termo_busca_servico,
+                        limite=int(limite_resultados_servico)
+                    )
+
+                st.session_state["df_servicos_encontrados"] = df_servicos_encontrados
+                st.session_state["diagnostico_servicos"] = diagnostico_servicos
+
+        df_servicos_encontrados = st.session_state.get("df_servicos_encontrados")
+
+        if df_servicos_encontrados is not None:
+            diagnostico_servicos = st.session_state.get("diagnostico_servicos", {})
+
+            if df_servicos_encontrados.empty:
+                if diagnostico_servicos.get("erros"):
+                    st.error("Não foi possível carregar o catálogo de serviços na API do Compras.gov.br.")
+                else:
+                    st.warning("Nenhum serviço encontrado para o termo informado.")
+            else:
+                st.success(f"{len(df_servicos_encontrados)} serviço(s) encontrado(s).")
+
+                def formatar_opcao_servico(indice):
+                    linha = df_servicos_encontrados.iloc[indice]
+                    return (
+                        f"{int(linha['codigoServico'])} - {linha.get('nomeServico', '')} "
+                        f"| Grupo {linha.get('codigoGrupo', '')} - {linha.get('nomeGrupo', '')}"
+                    )
+
+                indice_servico = st.selectbox(
+                    "Selecione o serviço localizado",
+                    options=list(range(len(df_servicos_encontrados))),
+                    format_func=formatar_opcao_servico,
+                    key="indice_servico_localizado"
                 )
 
-                max_default = min(10, len(codigos_disponiveis))
-                codigos_default = codigos_disponiveis[:max_default]
+                col_usar_servico_1, col_usar_servico_2 = st.columns([1, 4])
 
-                codigos_selecionados = st.multiselect(
-                    "Selecione os CATMATs para consulta de preços",
-                    options=codigos_disponiveis,
-                    default=codigos_default,
-                    key="codigos_catmat_selecionados"
+                with col_usar_servico_1:
+                    if st.button("Usar este CATSER"):
+                        linha_servico = df_servicos_encontrados.iloc[int(indice_servico)]
+                        limpar_session_state_servicos()
+                        st.session_state["codigo_servico_manual"] = int(linha_servico["codigoServico"])
+                        st.session_state["nome_servico_manual"] = str(linha_servico.get("nomeServico", ""))
+                        st.rerun()
+
+                with col_usar_servico_2:
+                    st.caption(
+                        "Ao usar um CATSER localizado, os preços carregados anteriormente são limpos."
+                    )
+
+                colunas_servico = [
+                    "codigoServico",
+                    "nomeServico",
+                    "codigoClasse",
+                    "nomeClasse",
+                    "codigoGrupo",
+                    "nomeGrupo"
+                ]
+                colunas_servico = [
+                    coluna
+                    for coluna in colunas_servico
+                    if coluna in df_servicos_encontrados.columns
+                ]
+                st.dataframe(df_servicos_encontrados[colunas_servico], use_container_width=True, hide_index=True)
+
+            with st.expander("Diagnóstico da busca de serviço"):
+                st.json(diagnostico_servicos)
+
+        st.header("2. Confirmar serviço")
+
+        col_servico_1, col_servico_2 = st.columns(2)
+
+        with col_servico_1:
+            codigo_servico = st.number_input(
+                "Código CATSER",
+                min_value=1,
+                step=1,
+                key="codigo_servico_manual"
+            )
+
+        with col_servico_2:
+            nome_servico_informado = st.text_input(
+                "Nome do serviço, opcional",
+                key="nome_servico_manual"
+            )
+
+        st.caption(
+            "Para serviços, a consulta usa o código CATSER diretamente, sem etapa de PDM/CATMAT."
+        )
+
+        st.header("3. Consulta de preços")
+
+        col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
+
+        with col_preco_serv_1:
+            data_inicial_servico = st.date_input(
+                "Data inicial",
+                value=date(2024, 1, 1),
+                key="data_inicial_precos_servico"
+            )
+
+        with col_preco_serv_2:
+            data_final_servico = st.date_input(
+                "Data final",
+                value=date.today(),
+                key="data_final_precos_servico"
+            )
+
+        with col_preco_serv_3:
+            max_paginas_preco_servico = st.number_input(
+                "Máximo de páginas por CATSER",
+                min_value=1,
+                max_value=10,
+                value=2,
+                step=1,
+                key="max_paginas_preco_servico"
+            )
+
+        with col_preco_serv_4:
+            tamanho_pagina_preco_servico = st.number_input(
+                "Registros por página em preços",
+                min_value=10,
+                max_value=100,
+                value=50,
+                step=10,
+                key="tamanho_pagina_preco_servico"
+            )
+
+        if st.button("Consultar preços do CATSER selecionado"):
+            limpar_session_state_precos()
+
+            with st.spinner("Consultando preços praticados para o serviço..."):
+                resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
+                    codigos_itens=[int(codigo_servico)],
+                    data_inicial=data_inicial_servico,
+                    data_final=data_final_servico,
+                    tipo_catalogo="servico",
+                    max_paginas_por_item=int(max_paginas_preco_servico),
+                    tamanho_pagina=int(tamanho_pagina_preco_servico)
                 )
 
-                st.header("6. Consulta de preços")
-
-                col_preco_1, col_preco_2, col_preco_3, col_preco_4 = st.columns(4)
-
-                with col_preco_1:
-                    data_inicial = st.date_input(
-                        "Data inicial",
-                        value=date(2024, 1, 1),
-                        key="data_inicial_precos"
-                    )
-
-                with col_preco_2:
-                    data_final = st.date_input(
-                        "Data final",
-                        value=date.today(),
-                        key="data_final_precos"
-                    )
-
-                with col_preco_3:
-                    max_paginas_preco = st.number_input(
-                        "Máximo de páginas por CATMAT",
-                        min_value=1,
-                        max_value=10,
-                        value=2,
-                        step=1,
-                        key="max_paginas_preco"
-                    )
-
-                with col_preco_4:
-                    tamanho_pagina_preco = st.number_input(
-                        "Registros por página em preços",
-                        min_value=10,
-                        max_value=100,
-                        value=50,
-                        step=10,
-                        key="tamanho_pagina_preco"
-                    )
-
-                if st.button("Consultar preços dos CATMATs selecionados"):
-                    limpar_session_state_precos()
-
-                    if not codigos_selecionados:
-                        st.warning("Selecione pelo menos um CATMAT.")
-                    else:
-                        with st.spinner("Consultando preços praticados..."):
-                            resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_catmats(
-                                codigos_catmat=codigos_selecionados,
-                                data_inicial=data_inicial,
-                                data_final=data_final,
-                                max_paginas_por_catmat=int(max_paginas_preco),
-                                tamanho_pagina=int(tamanho_pagina_preco)
-                            )
-
-                        df_precos = pd.DataFrame(resultados_precos)
-
-                        st.session_state["resultados_precos"] = resultados_precos
-                        st.session_state["erros_precos"] = erros_precos
-                        st.session_state["urls_precos"] = urls_precos
-                        st.session_state["df_precos"] = df_precos
-                        st.session_state["codigos_catmat_consultados"] = codigos_selecionados
-                        st.session_state["data_inicial_precos_final"] = data_inicial
-                        st.session_state["data_final_precos_final"] = data_final
+            st.session_state["resultados_precos"] = resultados_precos
+            st.session_state["erros_precos"] = erros_precos
+            st.session_state["urls_precos"] = urls_precos
+            st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
+            st.session_state["codigos_catalogo_consultados"] = [int(codigo_servico)]
+            st.session_state["tipo_catalogo_precos"] = "CATSER"
+            st.session_state["coluna_codigo_consultado_precos"] = "catser_consultado"
+            st.session_state["arquivo_csv_precos"] = "precos_consolidados_catser.csv"
+            st.session_state["codigo_servico_atual"] = int(codigo_servico)
+            st.session_state["nome_servico_atual"] = nome_servico_informado
+            st.session_state["data_inicial_precos_final"] = data_inicial_servico
+            st.session_state["data_final_precos_final"] = data_final_servico
 
     if "df_precos" in st.session_state:
         df_precos = st.session_state["df_precos"]
         erros_precos = st.session_state.get("erros_precos", [])
         urls_precos = st.session_state.get("urls_precos", [])
+        tipo_precos = st.session_state.get("tipo_catalogo_precos", "CATMAT")
+        coluna_codigo_consultado = st.session_state.get(
+            "coluna_codigo_consultado_precos",
+            "catmat_consultado"
+        )
+        arquivo_csv_precos = st.session_state.get(
+            "arquivo_csv_precos",
+            "precos_consolidados_catmat.csv"
+        )
 
-        st.header("7. Resultados consolidados de preços")
+        st.header(f"7. Resultados consolidados de preços ({tipo_precos})")
 
         st.write("Registros de preços carregados:", len(df_precos))
 
@@ -1216,7 +1699,7 @@ with aba_principal:
             st.json(erros_precos)
 
         if df_precos.empty:
-            st.warning("Nenhum preço retornado para os CATMATs selecionados.")
+            st.warning(f"Nenhum preço retornado para o(s) código(s) {tipo_precos} selecionado(s).")
         else:
             st.dataframe(df_precos, use_container_width=True)
 
@@ -1256,12 +1739,12 @@ with aba_principal:
 
             descricao_col = primeira_coluna_existente(
                 df_precos,
-                ["descricaoItem", "descricao", "descricao_item"]
+                ["descricaoItem", "descricao", "descricao_item", "descricaoDetalhadaItem"]
             )
 
             if descricao_col:
                 st.subheader("Descrições de itens encontradas")
-                colunas_desc = ["catmat_consultado", descricao_col]
+                colunas_desc = [coluna_codigo_consultado, descricao_col]
                 colunas_desc = [c for c in colunas_desc if c in df_precos.columns]
 
                 descricoes = df_precos[colunas_desc].drop_duplicates()
@@ -1272,7 +1755,7 @@ with aba_principal:
             st.download_button(
                 label="Baixar preços consolidados em CSV",
                 data=csv,
-                file_name="precos_consolidados_catmat.csv",
+                file_name=arquivo_csv_precos,
                 mime="text/csv"
             )
 
