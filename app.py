@@ -1635,10 +1635,19 @@ with aba_principal:
                         st.warning("Não foram identificadas características estruturáveis nos serviços localizados.")
                     else:
                         cols_servico = st.columns(3)
+                        nomes_caracteristicas_servico = {
+                            "GRUPO": "Grupo",
+                            "CLASSE": "Classe",
+                            "SERVICO_BASE": "Serviço base"
+                        }
 
                         for i, item in enumerate(candidatas_servico[:6]):
                             coluna = item["coluna"]
-                            nome = item["nome"]
+                            nome_original = item["nome"]
+                            nome = nomes_caracteristicas_servico.get(
+                                nome_original,
+                                nome_original.replace("_", " ").title()
+                            )
 
                             valores = (
                                 df_servicos_carac[coluna]
@@ -1754,51 +1763,45 @@ with aba_principal:
                 f"{len(codigos_servico_consulta)} CATSER(s) selecionado(s) para comparação: "
                 + ", ".join(str(codigo) for codigo in codigos_servico_consulta)
             )
-        else:
-            st.info("Selecione pelo menos um CATSER para habilitar a consulta de preços.")
+            st.header("3. Consulta de preços")
 
-        st.header("3. Consulta de preços")
+            col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
 
-        col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
+            with col_preco_serv_1:
+                data_inicial_servico = st.date_input(
+                    "Data inicial",
+                    value=date(2024, 1, 1),
+                    key="data_inicial_precos_servico"
+                )
 
-        with col_preco_serv_1:
-            data_inicial_servico = st.date_input(
-                "Data inicial",
-                value=date(2024, 1, 1),
-                key="data_inicial_precos_servico"
-            )
+            with col_preco_serv_2:
+                data_final_servico = st.date_input(
+                    "Data final",
+                    value=date.today(),
+                    key="data_final_precos_servico"
+                )
 
-        with col_preco_serv_2:
-            data_final_servico = st.date_input(
-                "Data final",
-                value=date.today(),
-                key="data_final_precos_servico"
-            )
+            with col_preco_serv_3:
+                max_paginas_preco_servico = st.number_input(
+                    "Máximo de páginas por CATSER",
+                    min_value=1,
+                    max_value=10,
+                    value=2,
+                    step=1,
+                    key="max_paginas_preco_servico"
+                )
 
-        with col_preco_serv_3:
-            max_paginas_preco_servico = st.number_input(
-                "Máximo de páginas por CATSER",
-                min_value=1,
-                max_value=10,
-                value=2,
-                step=1,
-                key="max_paginas_preco_servico"
-            )
+            with col_preco_serv_4:
+                tamanho_pagina_preco_servico = st.number_input(
+                    "Registros por página em preços",
+                    min_value=10,
+                    max_value=100,
+                    value=50,
+                    step=10,
+                    key="tamanho_pagina_preco_servico"
+                )
 
-        with col_preco_serv_4:
-            tamanho_pagina_preco_servico = st.number_input(
-                "Registros por página em preços",
-                min_value=10,
-                max_value=100,
-                value=50,
-                step=10,
-                key="tamanho_pagina_preco_servico"
-            )
-
-        if st.button("Consultar preços dos CATSERs selecionados"):
-            if not codigos_servico_consulta:
-                st.warning("Selecione pelo menos um CATSER antes de consultar preços.")
-            else:
+            if st.button("Consultar preços dos CATSERs selecionados"):
                 limpar_session_state_precos()
 
                 with st.spinner("Consultando preços praticados para os serviços selecionados..."):
@@ -1821,6 +1824,8 @@ with aba_principal:
                 st.session_state["arquivo_csv_precos"] = "precos_consolidados_catser.csv"
                 st.session_state["data_inicial_precos_final"] = data_inicial_servico
                 st.session_state["data_final_precos_final"] = data_final_servico
+        else:
+            st.info("Selecione pelo menos um CATSER para avançar à consulta de preços.")
 
     if "df_precos" in st.session_state:
         df_precos = st.session_state["df_precos"]
