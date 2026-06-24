@@ -1048,6 +1048,139 @@ def aplicar_filtros_dinamicos(df, filtros):
 # ESTATÍSTICAS E RESUMOS
 # ============================================================
 
+def normalizar_valor_exibicao(valor):
+    if valor is None or pd.isna(valor):
+        return ""
+
+    texto = str(valor).strip()
+
+    if texto.lower() in ["", "nan", "none", "null"]:
+        return ""
+
+    return texto
+
+
+def normalizar_capacidade_unidade(valor):
+    texto = normalizar_valor_exibicao(valor)
+
+    if not texto:
+        return ""
+
+    try:
+        numero = float(texto.replace(",", "."))
+    except Exception:
+        return texto
+
+    if numero == 0:
+        return ""
+
+    if numero.is_integer():
+        return str(int(numero))
+
+    return str(numero).replace(".", ",")
+
+
+def montar_rotulo_unidade_fornecimento(linha, colunas):
+    sigla_fornecimento = normalizar_valor_exibicao(
+        linha.get(colunas.get("sigla_fornecimento"))
+    )
+    nome_fornecimento = normalizar_valor_exibicao(
+        linha.get(colunas.get("nome_fornecimento"))
+    )
+    capacidade = normalizar_capacidade_unidade(
+        linha.get(colunas.get("capacidade_fornecimento"))
+    )
+    sigla_medida = normalizar_valor_exibicao(
+        linha.get(colunas.get("sigla_medida"))
+    )
+    nome_medida = normalizar_valor_exibicao(
+        linha.get(colunas.get("nome_medida"))
+    )
+
+    partes = []
+
+    if sigla_fornecimento and nome_fornecimento:
+        partes.append(f"{sigla_fornecimento} - {nome_fornecimento}")
+    elif nome_fornecimento:
+        partes.append(nome_fornecimento)
+    elif sigla_fornecimento:
+        partes.append(sigla_fornecimento)
+
+    if capacidade:
+        medida = sigla_medida or nome_medida
+        partes.append(
+            f"Capacidade: {capacidade} {medida}".strip()
+        )
+    elif sigla_medida or nome_medida:
+        partes.append(f"Medida: {sigla_medida or nome_medida}")
+
+    return " | ".join(partes) if partes else "Unidade não informada"
+
+
+def aplicar_filtro_unidade_fornecimento(df, chave):
+    colunas = {
+        "sigla_fornecimento": primeira_coluna_existente(
+            df,
+            ["siglaUnidadeFornecimento", "sigla_unidade_fornecimento"]
+        ),
+        "nome_fornecimento": primeira_coluna_existente(
+            df,
+            ["nomeUnidadeFornecimento", "nome_unidade_fornecimento"]
+        ),
+        "capacidade_fornecimento": primeira_coluna_existente(
+            df,
+            ["capacidadeUnidadeFornecimento", "capacidade_unidade_fornecimento"]
+        ),
+        "sigla_medida": primeira_coluna_existente(
+            df,
+            ["siglaUnidadeMedida", "sigla_unidade_medida"]
+        ),
+        "nome_medida": primeira_coluna_existente(
+            df,
+            ["nomeUnidadeMedida", "nome_unidade_medida"]
+        )
+    }
+
+    if not any(colunas.values()):
+        return df
+
+    coluna_unidade_resumo = "_unidade_fornecimento_resumo"
+    df_unidades = df.copy()
+    df_unidades[coluna_unidade_resumo] = df_unidades.apply(
+        lambda linha: montar_rotulo_unidade_fornecimento(linha, colunas),
+        axis=1
+    )
+
+    contagens = (
+        df_unidades[coluna_unidade_resumo]
+        .value_counts(dropna=False)
+        .sort_index()
+    )
+    opcoes_unidade = contagens.index.tolist()
+
+    st.subheader("Filtro de unidade de fornecimento")
+
+    unidades_selecionadas = st.multiselect(
+        "Unidade de fornecimento considerada no resumo estatístico",
+        options=opcoes_unidade,
+        default=opcoes_unidade,
+        format_func=lambda unidade: f"{unidade} ({int(contagens[unidade])})",
+        key=f"filtro_unidade_fornecimento_{chave}"
+    )
+
+    if not unidades_selecionadas:
+        st.warning("Selecione pelo menos uma unidade de fornecimento para calcular o resumo estatístico.")
+        return df_unidades.iloc[0:0].drop(columns=[coluna_unidade_resumo])
+
+    df_filtrado = df_unidades[
+        df_unidades[coluna_unidade_resumo].isin(unidades_selecionadas)
+    ].copy()
+
+    st.write("Registros considerados no resumo estatístico:", len(df_filtrado))
+
+    return df_filtrado.drop(columns=[coluna_unidade_resumo])
+
+
 def exibir_estatisticas_precos(df):
     st.subheader("Resumo estatístico dos preços")
 
@@ -1886,17 +2019,22 @@ with aba_principal:
         else:
             st.dataframe(df_precos, use_container_width=True)
 
-            exibir_estatisticas_precos(df_precos)
+            df_precos_analise = aplicar_filtro_unidade_fornecimento(
+                df_precos,
+                f"{tipo_precos.lower()}_consolidado"
+            )
+
+            exibir_estatisticas_precos(df_precos_analise)
 
             fornecedor_col = primeira_coluna_existente(
-                df_precos,
+                df_precos_analise,
                 ["nomeFornecedor", "fornecedor", "razaoSocialFornecedor"]
             )
 
-            if fornecedor_col:
+            if fornecedor_col and not df_precos_analise.empty:
                 st.subheader("Fornecedores mais recorrentes")
                 fornecedores = (
-                    df_precos[fornecedor_col]
+                    df_precos_analise[fornecedor_col]
                     .fillna("Não informado")
                     .value_counts()
                     .reset_index()
@@ -1905,14 +2043,14 @@ with aba_principal:
                 st.dataframe(fornecedores.head(20), use_container_width=True)
 
             orgao_col = primeira_coluna_existente(
-                df_precos,
+                df_precos_analise,
                 ["nomeOrgao", "orgao", "nomeOrgaoSuperior"]
             )
 
-            if orgao_col:
+            if orgao_col and not df_precos_analise.empty:
                 st.subheader("Órgãos compradores mais recorrentes")
                 orgaos = (
-                    df_precos[orgao_col]
+                    df_precos_analise[orgao_col]
                     .fillna("Não informado")
                     .value_counts()
                     .reset_index()
@@ -1921,16 +2059,16 @@ with aba_principal:
                 st.dataframe(orgaos.head(20), use_container_width=True)
 
             descricao_col = primeira_coluna_existente(
-                df_precos,
+                df_precos_analise,
                 ["descricaoItem", "descricao", "descricao_item", "descricaoDetalhadaItem"]
             )
 
-            if descricao_col:
+            if descricao_col and not df_precos_analise.empty:
                 st.subheader("Descrições de itens encontradas")
                 colunas_desc = [coluna_codigo_consultado, descricao_col]
-                colunas_desc = [c for c in colunas_desc if c in df_precos.columns]
+                colunas_desc = [c for c in colunas_desc if c in df_precos_analise.columns]
 
-                descricoes = df_precos[colunas_desc].drop_duplicates()
+                descricoes = df_precos_analise[colunas_desc].drop_duplicates()
                 st.dataframe(descricoes.head(100), use_container_width=True)
 
             csv = df_precos.to_csv(index=False).encode("utf-8-sig")
