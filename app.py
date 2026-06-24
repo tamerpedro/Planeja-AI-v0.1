@@ -834,10 +834,15 @@ def consultar_precos_multiplos_itens_catalogo(
 
     for i, codigo in enumerate(codigos_itens):
         params_base = {
-            "codigoItemCatalogo": int(codigo),
-            data_inicio_param: data_inicial.strftime("%Y-%m-%d"),
-            data_fim_param: data_final.strftime("%Y-%m-%d")
+            "codigoItemCatalogo": int(codigo)
         }
+        adicionar_parametros_data(
+            params_base,
+            data_inicio_param,
+            data_fim_param,
+            data_inicial,
+            data_final
+        )
 
         resultados, erros, total_registros, total_paginas, urls_consultadas = consultar_paginas(
             endpoint=endpoint,
@@ -866,10 +871,15 @@ def consultar_precos_multiplos_itens_catalogo(
                 data_final
             ):
                 params_fallback = {
-                    "codigoItemCatalogo": int(codigo),
-                    data_inicio_param: data_inicio_fallback.strftime("%Y-%m-%d"),
-                    data_fim_param: data_fim_fallback.strftime("%Y-%m-%d")
+                    "codigoItemCatalogo": int(codigo)
                 }
+                adicionar_parametros_data(
+                    params_fallback,
+                    data_inicio_param,
+                    data_fim_param,
+                    data_inicio_fallback,
+                    data_fim_fallback
+                )
 
                 (
                     resultados_fallback,
@@ -916,8 +926,8 @@ def consultar_precos_multiplos_itens_catalogo(
             "registrosAposFiltroData": len(resultados),
             "removidosPorFiltroData": removidos_por_periodo,
             "consultaAmpliada": consulta_ampliada,
-            "dataInicioConsultaAPI": data_inicio_api.strftime("%Y-%m-%d"),
-            "dataFimConsultaAPI": data_fim_api.strftime("%Y-%m-%d"),
+            "dataInicioConsultaAPI": formatar_data_diagnostico(data_inicio_api),
+            "dataFimConsultaAPI": formatar_data_diagnostico(data_fim_api),
             "urlPrimeiraPagina": url_consulta_usada
         })
 
@@ -937,17 +947,43 @@ def consultar_precos_multiplos_itens_catalogo(
     return todos_resultados, todos_erros, urls
 
 
+def adicionar_parametros_data(params, data_inicio_param, data_fim_param, data_inicial, data_final):
+    if data_inicial is not None:
+        params[data_inicio_param] = data_inicial.strftime("%Y-%m-%d")
+
+    if data_final is not None:
+        params[data_fim_param] = data_final.strftime("%Y-%m-%d")
+
+
+def formatar_data_diagnostico(data_valor):
+    if data_valor is None:
+        return "sem data"
+
+    return data_valor.strftime("%Y-%m-%d")
+
+
 def criar_janelas_consulta_ampliada(data_inicial, data_final):
-    data_inicial_ref = pd.to_datetime(data_inicial).date()
-    data_final_ref = pd.to_datetime(data_final).date()
+    data_inicial_ref = pd.to_datetime(data_inicial).date() if data_inicial is not None else None
+    data_final_ref = pd.to_datetime(data_final).date() if data_final is not None else date.today()
     data_final_ampliada = max(data_final_ref, date.today())
     janelas = []
 
-    anos_inicio = [
-        data_inicial_ref.year,
-        data_inicial_ref.year - 1,
-        data_inicial_ref.year - 2
-    ]
+    if data_inicial_ref is None:
+        anos_inicio = [
+            data_final_ref.year,
+            data_final_ref.year - 1,
+            2024,
+            2021,
+            2018
+        ]
+    else:
+        anos_inicio = [
+            data_inicial_ref.year,
+            data_inicial_ref.year - 1,
+            data_inicial_ref.year - 2,
+            2024,
+            2021
+        ]
 
     finais = [data_final_ref]
 
@@ -964,9 +1000,6 @@ def criar_janelas_consulta_ampliada(data_inicial, data_final):
             if data_inicio_ampliada == data_inicial_ref and data_fim_ampliada == data_final_ref:
                 continue
 
-            if data_inicio_ampliada > data_inicial_ref:
-                continue
-
             janela = (data_inicio_ampliada, data_fim_ampliada)
 
             if janela not in janelas:
@@ -979,8 +1012,11 @@ def filtrar_resultados_por_data_compra(resultados, data_inicial, data_final):
     if not resultados:
         return [], 0
 
-    data_inicial_ref = pd.to_datetime(data_inicial).date()
-    data_final_ref = pd.to_datetime(data_final).date()
+    if data_inicial is None and data_final is None:
+        return resultados, 0
+
+    data_inicial_ref = pd.to_datetime(data_inicial).date() if data_inicial is not None else None
+    data_final_ref = pd.to_datetime(data_final).date() if data_final is not None else None
     filtrados = []
 
     for item in resultados:
@@ -991,8 +1027,13 @@ def filtrar_resultados_por_data_compra(resultados, data_inicial, data_final):
 
         data_compra_ref = data_compra.date()
 
-        if data_inicial_ref <= data_compra_ref <= data_final_ref:
-            filtrados.append(item)
+        if data_inicial_ref is not None and data_compra_ref < data_inicial_ref:
+            continue
+
+        if data_final_ref is not None and data_compra_ref > data_final_ref:
+            continue
+
+        filtrados.append(item)
 
     return filtrados, len(resultados) - len(filtrados)
 
@@ -1753,21 +1794,35 @@ with aba_principal:
 
                     st.header("6. Consulta de preços")
 
+                    usar_filtro_data_precos = st.checkbox(
+                        "Filtrar por período",
+                        value=True,
+                        key="usar_filtro_data_precos"
+                    )
+
                     col_preco_1, col_preco_2, col_preco_3, col_preco_4 = st.columns(4)
 
                     with col_preco_1:
-                        data_inicial = st.date_input(
-                            "Data inicial",
-                            value=date(2024, 1, 1),
-                            key="data_inicial_precos"
-                        )
+                        if usar_filtro_data_precos:
+                            data_inicial = st.date_input(
+                                "Data inicial",
+                                value=date(2024, 1, 1),
+                                key="data_inicial_precos"
+                            )
+                        else:
+                            data_inicial = None
+                            st.info("Sem data inicial")
 
                     with col_preco_2:
-                        data_final = st.date_input(
-                            "Data final",
-                            value=date.today(),
-                            key="data_final_precos"
-                        )
+                        if usar_filtro_data_precos:
+                            data_final = st.date_input(
+                                "Data final",
+                                value=date.today(),
+                                key="data_final_precos"
+                            )
+                        else:
+                            data_final = None
+                            st.info("Sem data final")
 
                     with col_preco_3:
                         max_paginas_preco = st.number_input(
@@ -2046,21 +2101,35 @@ with aba_principal:
             )
             st.header("3. Consulta de preços")
 
+            usar_filtro_data_precos_servico = st.checkbox(
+                "Filtrar por período",
+                value=True,
+                key="usar_filtro_data_precos_servico"
+            )
+
             col_preco_serv_1, col_preco_serv_2, col_preco_serv_3, col_preco_serv_4 = st.columns(4)
 
             with col_preco_serv_1:
-                data_inicial_servico = st.date_input(
-                    "Data inicial",
-                    value=date(2024, 1, 1),
-                    key="data_inicial_precos_servico"
-                )
+                if usar_filtro_data_precos_servico:
+                    data_inicial_servico = st.date_input(
+                        "Data inicial",
+                        value=date(2024, 1, 1),
+                        key="data_inicial_precos_servico"
+                    )
+                else:
+                    data_inicial_servico = None
+                    st.info("Sem data inicial")
 
             with col_preco_serv_2:
-                data_final_servico = st.date_input(
-                    "Data final",
-                    value=date.today(),
-                    key="data_final_precos_servico"
-                )
+                if usar_filtro_data_precos_servico:
+                    data_final_servico = st.date_input(
+                        "Data final",
+                        value=date.today(),
+                        key="data_final_precos_servico"
+                    )
+                else:
+                    data_final_servico = None
+                    st.info("Sem data final")
 
             with col_preco_serv_3:
                 max_paginas_preco_servico = st.number_input(
@@ -2256,21 +2325,35 @@ with aba_direta:
             key="direto_paginas"
         )
 
+    usar_filtro_data_direta = st.checkbox(
+        "Filtrar por período",
+        value=True,
+        key="direto_usar_filtro_data"
+    )
+
     col4, col5 = st.columns(2)
 
     with col4:
-        data_inicial_direta = st.date_input(
-            "Data inicial",
-            value=date(2024, 1, 1),
-            key="direto_data_inicial"
-        )
+        if usar_filtro_data_direta:
+            data_inicial_direta = st.date_input(
+                "Data inicial",
+                value=date(2024, 1, 1),
+                key="direto_data_inicial"
+            )
+        else:
+            data_inicial_direta = None
+            st.info("Sem data inicial")
 
     with col5:
-        data_final_direta = st.date_input(
-            "Data final",
-            value=date.today(),
-            key="direto_data_final"
-        )
+        if usar_filtro_data_direta:
+            data_final_direta = st.date_input(
+                "Data final",
+                value=date.today(),
+                key="direto_data_final"
+            )
+        else:
+            data_final_direta = None
+            st.info("Sem data final")
 
     if st.button("Consultar preços praticados", key="direto_botao"):
         try:
