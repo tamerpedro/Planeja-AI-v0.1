@@ -136,6 +136,7 @@ def limpar_session_state_precos():
         "tipo_catalogo_precos",
         "coluna_codigo_consultado_precos",
         "arquivo_csv_precos",
+        "diagnostico_precos_por_codigo",
         "data_inicial_precos_final",
         "data_final_precos_final"
     ]:
@@ -802,15 +803,20 @@ def consultar_precos_multiplos_itens_catalogo(
     data_final,
     tipo_catalogo="material",
     max_paginas_por_item=2,
-    tamanho_pagina=50
+    tamanho_pagina=50,
+    retornar_diagnostico=False
 ):
     todos_resultados = []
     todos_erros = []
     urls = []
+    diagnosticos = []
 
     total = len(codigos_itens)
 
     if total == 0:
+        if retornar_diagnostico:
+            return todos_resultados, todos_erros, urls, diagnosticos
+
         return todos_resultados, todos_erros, urls
 
     if tipo_catalogo == "servico":
@@ -833,7 +839,7 @@ def consultar_precos_multiplos_itens_catalogo(
             data_fim_param: data_final.strftime("%Y-%m-%d")
         }
 
-        resultados, erros, _, _, urls_consultadas = consultar_paginas(
+        resultados, erros, total_registros, total_paginas, urls_consultadas = consultar_paginas(
             endpoint=endpoint,
             params_base=params_base,
             tamanho_pagina=int(tamanho_pagina),
@@ -843,11 +849,23 @@ def consultar_precos_multiplos_itens_catalogo(
             pular_pagina_com_erro=True
         )
 
-        resultados, _ = filtrar_resultados_por_data_compra(
+        registros_retornados_api = len(resultados)
+        resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
             resultados,
             data_inicial,
             data_final
         )
+
+        diagnosticos.append({
+            "tipo": "CATSER" if tipo_catalogo == "servico" else "CATMAT",
+            "codigo": int(codigo),
+            "totalRegistrosAPI": total_registros,
+            "totalPaginasAPI": total_paginas,
+            "registrosRetornadosNasPaginas": registros_retornados_api,
+            "registrosAposFiltroData": len(resultados),
+            "removidosPorFiltroData": removidos_por_periodo,
+            "urlPrimeiraPagina": urls_consultadas[0] if urls_consultadas else None
+        })
 
         for item in resultados:
             item[coluna_codigo_consultado] = int(codigo)
@@ -858,6 +876,9 @@ def consultar_precos_multiplos_itens_catalogo(
 
         progresso.progress((i + 1) / total)
         time.sleep(0.2)
+
+    if retornar_diagnostico:
+        return todos_resultados, todos_erros, urls, diagnosticos
 
     return todos_resultados, todos_erros, urls
 
@@ -1683,18 +1704,25 @@ with aba_principal:
                             st.warning("Selecione pelo menos um CATMAT.")
                         else:
                             with st.spinner("Consultando preços praticados..."):
-                                resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
+                                (
+                                    resultados_precos,
+                                    erros_precos,
+                                    urls_precos,
+                                    diagnostico_precos
+                                ) = consultar_precos_multiplos_itens_catalogo(
                                     codigos_itens=codigos_selecionados,
                                     data_inicial=data_inicial,
                                     data_final=data_final,
                                     tipo_catalogo="material",
                                     max_paginas_por_item=int(max_paginas_preco),
-                                    tamanho_pagina=int(tamanho_pagina_preco)
+                                    tamanho_pagina=int(tamanho_pagina_preco),
+                                    retornar_diagnostico=True
                                 )
 
                             st.session_state["resultados_precos"] = resultados_precos
                             st.session_state["erros_precos"] = erros_precos
                             st.session_state["urls_precos"] = urls_precos
+                            st.session_state["diagnostico_precos_por_codigo"] = diagnostico_precos
                             st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
                             st.session_state["codigos_catmat_consultados"] = codigos_selecionados
                             st.session_state["codigos_catalogo_consultados"] = codigos_selecionados
@@ -1966,18 +1994,25 @@ with aba_principal:
                 limpar_session_state_precos()
 
                 with st.spinner("Consultando preços praticados para os serviços selecionados..."):
-                    resultados_precos, erros_precos, urls_precos = consultar_precos_multiplos_itens_catalogo(
+                    (
+                        resultados_precos,
+                        erros_precos,
+                        urls_precos,
+                        diagnostico_precos
+                    ) = consultar_precos_multiplos_itens_catalogo(
                         codigos_itens=codigos_servico_consulta,
                         data_inicial=data_inicial_servico,
                         data_final=data_final_servico,
                         tipo_catalogo="servico",
                         max_paginas_por_item=int(max_paginas_preco_servico),
-                        tamanho_pagina=int(tamanho_pagina_preco_servico)
+                        tamanho_pagina=int(tamanho_pagina_preco_servico),
+                        retornar_diagnostico=True
                     )
 
                 st.session_state["resultados_precos"] = resultados_precos
                 st.session_state["erros_precos"] = erros_precos
                 st.session_state["urls_precos"] = urls_precos
+                st.session_state["diagnostico_precos_por_codigo"] = diagnostico_precos
                 st.session_state["df_precos"] = pd.DataFrame(resultados_precos)
                 st.session_state["codigos_catalogo_consultados"] = codigos_servico_consulta
                 st.session_state["tipo_catalogo_precos"] = "CATSER"
@@ -1992,6 +2027,7 @@ with aba_principal:
         df_precos = st.session_state["df_precos"]
         erros_precos = st.session_state.get("erros_precos", [])
         urls_precos = st.session_state.get("urls_precos", [])
+        diagnostico_precos = st.session_state.get("diagnostico_precos_por_codigo", [])
         tipo_precos = st.session_state.get("tipo_catalogo_precos", "CATMAT")
         coluna_codigo_consultado = st.session_state.get(
             "coluna_codigo_consultado_precos",
@@ -2009,6 +2045,14 @@ with aba_principal:
 
         with st.expander("URLs consultadas na pesquisa de preços"):
             st.write(urls_precos)
+
+        if diagnostico_precos:
+            with st.expander("Diagnóstico por código consultado", expanded=df_precos.empty):
+                st.dataframe(
+                    pd.DataFrame(diagnostico_precos),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
         if erros_precos:
             st.warning("Algumas consultas de preço retornaram erro.")
