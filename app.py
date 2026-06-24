@@ -15,7 +15,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="PlanejaIA",
+    page_title="Planeja AI",
     layout="wide"
 )
 
@@ -46,9 +46,9 @@ STOPWORDS_BUSCA = {
     "POR"
 }
 
-st.title("PlanejaIA - Consulta de preços públicos")
+st.title("Planeja AI - Consulta de preços públicos")
 st.write(
-    "Consulta de CATMAT/CATSER e preços praticados em bases públicas para apoio ao planejamento da contratação."
+    "Consulta de CATMAT/CATSER e preços praticados em bases públicas para apoio a pesquisa de preços."
 )
 
 st.divider()
