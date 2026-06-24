@@ -820,8 +820,8 @@ def consultar_precos_multiplos_itens_catalogo(
         coluna_codigo_consultado = "catser_consultado"
     else:
         endpoint = "/modulo-pesquisa-preco/1_consultarMaterial"
-        data_inicio_param = "dataCompraMin"
-        data_fim_param = "dataCompraMax"
+        data_inicio_param = "dataCompraInicio"
+        data_fim_param = "dataCompraFim"
         coluna_codigo_consultado = "catmat_consultado"
 
     progresso = st.progress(0)
@@ -843,6 +843,12 @@ def consultar_precos_multiplos_itens_catalogo(
             pular_pagina_com_erro=True
         )
 
+        resultados, _ = filtrar_resultados_por_data_compra(
+            resultados,
+            data_inicial,
+            data_final
+        )
+
         for item in resultados:
             item[coluna_codigo_consultado] = int(codigo)
 
@@ -854,6 +860,28 @@ def consultar_precos_multiplos_itens_catalogo(
         time.sleep(0.2)
 
     return todos_resultados, todos_erros, urls
+
+
+def filtrar_resultados_por_data_compra(resultados, data_inicial, data_final):
+    if not resultados:
+        return [], 0
+
+    data_inicial_ref = pd.to_datetime(data_inicial).date()
+    data_final_ref = pd.to_datetime(data_final).date()
+    filtrados = []
+
+    for item in resultados:
+        data_compra = pd.to_datetime(item.get("dataCompra"), errors="coerce")
+
+        if pd.isna(data_compra):
+            continue
+
+        data_compra_ref = data_compra.date()
+
+        if data_inicial_ref <= data_compra_ref <= data_final_ref:
+            filtrados.append(item)
+
+    return filtrados, len(resultados) - len(filtrados)
 
 
 def consultar_precos_multiplos_catmats(
@@ -1974,8 +2002,8 @@ with aba_direta:
         try:
             params_base = {
                 "codigoItemCatalogo": int(codigo_item),
-                "dataCompraMin": data_inicial_direta.strftime("%Y-%m-%d"),
-                "dataCompraMax": data_final_direta.strftime("%Y-%m-%d")
+                "dataCompraInicio": data_inicial_direta.strftime("%Y-%m-%d"),
+                "dataCompraFim": data_final_direta.strftime("%Y-%m-%d")
             }
 
             with st.spinner("Consultando Pesquisa de Preços..."):
@@ -1991,7 +2019,19 @@ with aba_direta:
 
             st.write("Total de registros informado pela API:", total_registros)
             st.write("Total de páginas informado pela API:", total_paginas)
+
+            resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
+                resultados,
+                data_inicial_direta,
+                data_final_direta
+            )
+
             st.write("Registros carregados no app:", len(resultados))
+
+            if removidos_por_periodo:
+                st.info(
+                    f"{removidos_por_periodo} registro(s) fora do período informado foram ignorados localmente."
+                )
 
             with st.expander("URLs consultadas"):
                 st.write(urls)
