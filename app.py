@@ -849,12 +849,63 @@ def consultar_precos_multiplos_itens_catalogo(
             pular_pagina_com_erro=True
         )
 
+        consulta_ampliada = False
+        data_inicio_api = data_inicial
+        data_fim_api = data_final
+        url_consulta_usada = urls_consultadas[0] if urls_consultadas else None
         registros_retornados_api = len(resultados)
         resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
             resultados,
             data_inicial,
             data_final
         )
+
+        if not resultados:
+            for data_inicio_fallback, data_fim_fallback in criar_janelas_consulta_ampliada(
+                data_inicial,
+                data_final
+            ):
+                params_fallback = {
+                    "codigoItemCatalogo": int(codigo),
+                    data_inicio_param: data_inicio_fallback.strftime("%Y-%m-%d"),
+                    data_fim_param: data_fim_fallback.strftime("%Y-%m-%d")
+                }
+
+                (
+                    resultados_fallback,
+                    erros_fallback,
+                    total_registros_fallback,
+                    total_paginas_fallback,
+                    urls_fallback
+                ) = consultar_paginas(
+                    endpoint=endpoint,
+                    params_base=params_fallback,
+                    tamanho_pagina=int(tamanho_pagina),
+                    max_paginas=int(max_paginas_por_item),
+                    timeout=120,
+                    tentativas_por_pagina=3,
+                    pular_pagina_com_erro=True
+                )
+
+                resultados_fallback_filtrados, removidos_fallback = filtrar_resultados_por_data_compra(
+                    resultados_fallback,
+                    data_inicial,
+                    data_final
+                )
+
+                if resultados_fallback_filtrados:
+                    resultados = resultados_fallback_filtrados
+                    erros.extend(erros_fallback)
+                    urls_consultadas.extend(urls_fallback)
+                    total_registros = total_registros_fallback
+                    total_paginas = total_paginas_fallback
+                    registros_retornados_api = len(resultados_fallback)
+                    removidos_por_periodo = removidos_fallback
+                    consulta_ampliada = True
+                    data_inicio_api = data_inicio_fallback
+                    data_fim_api = data_fim_fallback
+                    url_consulta_usada = urls_fallback[0] if urls_fallback else url_consulta_usada
+                    break
 
         diagnosticos.append({
             "tipo": "CATSER" if tipo_catalogo == "servico" else "CATMAT",
@@ -864,7 +915,10 @@ def consultar_precos_multiplos_itens_catalogo(
             "registrosRetornadosNasPaginas": registros_retornados_api,
             "registrosAposFiltroData": len(resultados),
             "removidosPorFiltroData": removidos_por_periodo,
-            "urlPrimeiraPagina": urls_consultadas[0] if urls_consultadas else None
+            "consultaAmpliada": consulta_ampliada,
+            "dataInicioConsultaAPI": data_inicio_api.strftime("%Y-%m-%d"),
+            "dataFimConsultaAPI": data_fim_api.strftime("%Y-%m-%d"),
+            "urlPrimeiraPagina": url_consulta_usada
         })
 
         for item in resultados:
@@ -881,6 +935,44 @@ def consultar_precos_multiplos_itens_catalogo(
         return todos_resultados, todos_erros, urls, diagnosticos
 
     return todos_resultados, todos_erros, urls
+
+
+def criar_janelas_consulta_ampliada(data_inicial, data_final):
+    data_inicial_ref = pd.to_datetime(data_inicial).date()
+    data_final_ref = pd.to_datetime(data_final).date()
+    data_final_ampliada = max(data_final_ref, date.today())
+    janelas = []
+
+    anos_inicio = [
+        data_inicial_ref.year,
+        data_inicial_ref.year - 1,
+        data_inicial_ref.year - 2
+    ]
+
+    finais = [data_final_ref]
+
+    if data_final_ampliada != data_final_ref:
+        finais.append(data_final_ampliada)
+
+    for ano in anos_inicio:
+        if ano < 2000:
+            continue
+
+        data_inicio_ampliada = date(ano, 1, 1)
+
+        for data_fim_ampliada in finais:
+            if data_inicio_ampliada == data_inicial_ref and data_fim_ampliada == data_final_ref:
+                continue
+
+            if data_inicio_ampliada > data_inicial_ref:
+                continue
+
+            janela = (data_inicio_ampliada, data_fim_ampliada)
+
+            if janela not in janelas:
+                janelas.append(janela)
+
+    return janelas
 
 
 def filtrar_resultados_por_data_compra(resultados, data_inicial, data_final):
@@ -2182,33 +2274,33 @@ with aba_direta:
 
     if st.button("Consultar preços praticados", key="direto_botao"):
         try:
-            params_base = {
-                "codigoItemCatalogo": int(codigo_item),
-                "dataCompraInicio": data_inicial_direta.strftime("%Y-%m-%d"),
-                "dataCompraFim": data_final_direta.strftime("%Y-%m-%d")
-            }
+            codigo_item_int = int(codigo_item)
 
             with st.spinner("Consultando Pesquisa de Preços..."):
-                resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
-                    endpoint="/modulo-pesquisa-preco/1_consultarMaterial",
-                    params_base=params_base,
+                (
+                    resultados,
+                    erros,
+                    urls,
+                    diagnostico_precos
+                ) = consultar_precos_multiplos_itens_catalogo(
+                    codigos_itens=[codigo_item_int],
+                    data_inicial=data_inicial_direta,
+                    data_final=data_final_direta,
+                    tipo_catalogo="material",
+                    max_paginas_por_item=int(max_paginas),
                     tamanho_pagina=int(tamanho_pagina),
-                    max_paginas=int(max_paginas),
-                    timeout=120,
-                    tentativas_por_pagina=3,
-                    pular_pagina_com_erro=True
+                    retornar_diagnostico=True
                 )
+
+            diagnostico_preco = diagnostico_precos[0] if diagnostico_precos else {}
+            total_registros = diagnostico_preco.get("totalRegistrosAPI")
+            total_paginas = diagnostico_preco.get("totalPaginasAPI")
 
             st.write("Total de registros informado pela API:", total_registros)
             st.write("Total de páginas informado pela API:", total_paginas)
-
-            resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
-                resultados,
-                data_inicial_direta,
-                data_final_direta
-            )
-
             st.write("Registros carregados no app:", len(resultados))
+
+            removidos_por_periodo = diagnostico_preco.get("removidosPorFiltroData", 0)
 
             if removidos_por_periodo:
                 st.info(
@@ -2217,6 +2309,14 @@ with aba_direta:
 
             with st.expander("URLs consultadas"):
                 st.write(urls)
+
+            if diagnostico_precos:
+                with st.expander("Diagnóstico por código consultado", expanded=not resultados):
+                    st.dataframe(
+                        pd.DataFrame(diagnostico_precos),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
             if erros:
                 st.warning("A consulta retornou erro em uma ou mais páginas.")
