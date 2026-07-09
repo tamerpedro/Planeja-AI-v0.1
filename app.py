@@ -4,6 +4,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from io import BytesIO
 
 import pandas as pd
 import requests
@@ -123,6 +124,60 @@ def primeira_coluna_existente(df, candidatas):
             return coluna
 
     return None
+
+
+def ajustar_larguras_excel(writer):
+    for worksheet in writer.book.worksheets:
+        worksheet.freeze_panes = "A2"
+
+        for coluna in worksheet.columns:
+            valores = [
+                "" if celula.value is None else str(celula.value)
+                for celula in coluna
+            ]
+            largura = min(max(len(valor) for valor in valores) + 2, 60)
+            worksheet.column_dimensions[coluna[0].column_letter].width = max(largura, 12)
+
+
+def gerar_excel_precos_consolidados(
+    df_precos,
+    df_precos_analise,
+    diagnostico_precos,
+    urls_precos
+):
+    arquivo = BytesIO()
+
+    with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
+        df_precos.to_excel(
+            writer,
+            sheet_name="precos_consolidados",
+            index=False
+        )
+
+        df_precos_analise.to_excel(
+            writer,
+            sheet_name="precos_para_analise",
+            index=False
+        )
+
+        if diagnostico_precos:
+            pd.DataFrame(diagnostico_precos).to_excel(
+                writer,
+                sheet_name="diagnostico",
+                index=False
+            )
+
+        if urls_precos:
+            pd.DataFrame({"url": urls_precos}).to_excel(
+                writer,
+                sheet_name="urls_consultadas",
+                index=False
+            )
+
+        ajustar_larguras_excel(writer)
+
+    arquivo.seek(0)
+    return arquivo.getvalue()
 
 
 def limpar_session_state_precos():
@@ -2277,13 +2332,31 @@ with aba_principal:
                 st.dataframe(descricoes.head(100), use_container_width=True)
 
             csv = df_precos.to_csv(index=False).encode("utf-8-sig")
-
-            st.download_button(
-                label="Baixar preços consolidados em CSV",
-                data=csv,
-                file_name=arquivo_csv_precos,
-                mime="text/csv"
+            arquivo_excel_precos = arquivo_csv_precos.rsplit(".", 1)[0] + ".xlsx"
+            excel = gerar_excel_precos_consolidados(
+                df_precos=df_precos,
+                df_precos_analise=df_precos_analise,
+                diagnostico_precos=diagnostico_precos,
+                urls_precos=urls_precos
             )
+
+            col_download_csv, col_download_excel = st.columns(2)
+
+            with col_download_csv:
+                st.download_button(
+                    label="Baixar preços consolidados em CSV",
+                    data=csv,
+                    file_name=arquivo_csv_precos,
+                    mime="text/csv"
+                )
+
+            with col_download_excel:
+                st.download_button(
+                    label="Baixar preços consolidados em Excel",
+                    data=excel,
+                    file_name=arquivo_excel_precos,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 # ============================================================
 # ABA 2 - CONSULTA DIRETA POR CATMAT
