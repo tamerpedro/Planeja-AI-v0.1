@@ -139,13 +139,168 @@ def ajustar_larguras_excel(writer):
             worksheet.column_dimensions[coluna[0].column_letter].width = max(largura, 12)
 
 
+def montar_analise_estatistica_excel(
+    estatisticas_antes,
+    estatisticas_depois
+):
+    colunas = [
+        "Indicador",
+        "Antes do saneamento",
+        "Depois do saneamento",
+        "Unidade"
+    ]
+
+    if not estatisticas_antes or not estatisticas_depois:
+        return pd.DataFrame(columns=colunas)
+
+    indicadores = [
+        (
+            "Registros com preço",
+            estatisticas_antes["registros_com_preco"],
+            estatisticas_depois["registros_com_preco"],
+            "registros"
+        ),
+        (
+            "Menor preço",
+            estatisticas_antes["menor_preco"],
+            estatisticas_depois["menor_preco"],
+            "R$"
+        ),
+        (
+            "Maior preço",
+            estatisticas_antes["maior_preco"],
+            estatisticas_depois["maior_preco"],
+            "R$"
+        ),
+        (
+            "Preço médio",
+            estatisticas_antes["preco_medio"],
+            estatisticas_depois["preco_medio"],
+            "R$"
+        ),
+        (
+            "Mediana",
+            estatisticas_antes["mediana"],
+            estatisticas_depois["mediana"],
+            "R$"
+        ),
+        (
+            "Desvio padrão amostral",
+            estatisticas_antes["desvio_padrao"],
+            estatisticas_depois["desvio_padrao"],
+            "R$"
+        ),
+        (
+            "Limite superior",
+            estatisticas_antes["limite_superior"],
+            estatisticas_depois["limite_superior"],
+            "R$"
+        ),
+        (
+            "Limite inferior",
+            estatisticas_antes["limite_inferior"],
+            estatisticas_depois["limite_inferior"],
+            "R$"
+        ),
+        (
+            "Coeficiente de variação",
+            estatisticas_antes["coeficiente_variacao"] * 100,
+            estatisticas_depois["coeficiente_variacao"] * 100,
+            "%"
+        ),
+        (
+            "Situação do coeficiente",
+            (
+                "Acima de 25%"
+                if estatisticas_antes["desvio_acima_25"]
+                else "Abaixo ou igual a 25%"
+            ),
+            (
+                "Acima de 25%"
+                if estatisticas_depois["desvio_acima_25"]
+                else "Abaixo ou igual a 25%"
+            ),
+            "critério"
+        )
+    ]
+
+    return pd.DataFrame(indicadores, columns=colunas)
+
+
+def formatar_abas_estatisticas_excel(writer):
+    formatos_moeda = {
+        "Menor preço",
+        "Maior preço",
+        "Preço médio",
+        "Mediana",
+        "Desvio padrão amostral",
+        "Limite superior",
+        "Limite inferior"
+    }
+
+    if "analise_estatistica" in writer.book.sheetnames:
+        worksheet = writer.book["analise_estatistica"]
+
+        for linha in range(2, worksheet.max_row + 1):
+            indicador = worksheet.cell(linha, 1).value
+
+            if indicador in formatos_moeda:
+                worksheet.cell(linha, 2).number_format = 'R$ #,##0.00'
+                worksheet.cell(linha, 3).number_format = 'R$ #,##0.00'
+            elif indicador == "Coeficiente de variação":
+                worksheet.cell(linha, 2).number_format = '0.00'
+                worksheet.cell(linha, 3).number_format = '0.00'
+
+    if "memoria_saneamento" in writer.book.sheetnames:
+        worksheet = writer.book["memoria_saneamento"]
+        cabecalhos = {
+            celula.value: celula.column
+            for celula in worksheet[1]
+        }
+
+        for nome_coluna, indice_coluna in cabecalhos.items():
+            if nome_coluna in {
+                "Média antes",
+                "Desvio padrão antes",
+                "Limite aplicado",
+                "Média depois",
+                "Desvio padrão depois"
+            }:
+                for linha in range(2, worksheet.max_row + 1):
+                    worksheet.cell(linha, indice_coluna).number_format = (
+                        'R$ #,##0.00'
+                    )
+            elif nome_coluna in {"CV antes (%)", "CV depois (%)"}:
+                for linha in range(2, worksheet.max_row + 1):
+                    worksheet.cell(linha, indice_coluna).number_format = '0.00'
+
+
 def gerar_excel_precos_consolidados(
     df_precos,
     df_precos_analise,
+    resultado_estatistico,
     diagnostico_precos,
     urls_precos
 ):
     arquivo = BytesIO()
+    resultado_estatistico = resultado_estatistico or {}
+
+    df_precos_saneados = resultado_estatistico.get(
+        "df_saneado",
+        pd.DataFrame(columns=df_precos_analise.columns)
+    )
+    df_outliers = resultado_estatistico.get(
+        "df_outliers",
+        pd.DataFrame()
+    )
+    df_memoria_saneamento = resultado_estatistico.get(
+        "df_memoria_saneamento",
+        pd.DataFrame()
+    )
+    df_analise_estatistica = montar_analise_estatistica_excel(
+        resultado_estatistico.get("estatisticas_antes"),
+        resultado_estatistico.get("estatisticas_depois")
+    )
 
     with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
         df_precos.to_excel(
@@ -157,6 +312,30 @@ def gerar_excel_precos_consolidados(
         df_precos_analise.to_excel(
             writer,
             sheet_name="precos_para_analise",
+            index=False
+        )
+
+        df_precos_saneados.to_excel(
+            writer,
+            sheet_name="precos_saneados",
+            index=False
+        )
+
+        df_analise_estatistica.to_excel(
+            writer,
+            sheet_name="analise_estatistica",
+            index=False
+        )
+
+        df_outliers.to_excel(
+            writer,
+            sheet_name="outliers_removidos",
+            index=False
+        )
+
+        df_memoria_saneamento.to_excel(
+            writer,
+            sheet_name="memoria_saneamento",
             index=False
         )
 
@@ -174,6 +353,7 @@ def gerar_excel_precos_consolidados(
                 index=False
             )
 
+        formatar_abas_estatisticas_excel(writer)
         ajustar_larguras_excel(writer)
 
     arquivo.seek(0)
@@ -1422,6 +1602,38 @@ def calcular_estatisticas_serie(serie_precos):
     }
 
 
+def criar_registro_memoria_saneamento(
+    rodada,
+    etapa,
+    estatisticas_antes,
+    limite_aplicado,
+    removidos,
+    estatisticas_depois
+):
+    return {
+        "Rodada": rodada,
+        "Etapa": etapa,
+        "Registros antes": estatisticas_antes["registros_com_preco"],
+        "Média antes": estatisticas_antes["preco_medio"],
+        "Desvio padrão antes": estatisticas_antes["desvio_padrao"],
+        "CV antes (%)": (
+            estatisticas_antes["coeficiente_variacao"] * 100
+            if estatisticas_antes["coeficiente_variacao"] is not None
+            else None
+        ),
+        "Limite aplicado": limite_aplicado,
+        "Outliers removidos": int(removidos),
+        "Registros depois": estatisticas_depois["registros_com_preco"],
+        "Média depois": estatisticas_depois["preco_medio"],
+        "Desvio padrão depois": estatisticas_depois["desvio_padrao"],
+        "CV depois (%)": (
+            estatisticas_depois["coeficiente_variacao"] * 100
+            if estatisticas_depois["coeficiente_variacao"] is not None
+            else None
+        )
+    }
+
+
 def sanear_precos_por_coeficiente_variacao(
     df,
     coluna_preco,
@@ -1435,6 +1647,7 @@ def sanear_precos_por_coeficiente_variacao(
     df_saneado = df_saneado.dropna(subset=[coluna_preco]).copy()
 
     grupos_removidos = []
+    memoria_saneamento = []
     rodada = 0
 
     while len(df_saneado) > 1:
@@ -1449,10 +1662,12 @@ def sanear_precos_por_coeficiente_variacao(
         rodada += 1
         houve_remocao = False
 
-        limite_superior = estatisticas["limite_superior"]
+        estatisticas_antes = estatisticas
+        limite_superior = estatisticas_antes["limite_superior"]
         mask_superior = df_saneado[coluna_preco] > limite_superior
+        quantidade_superiores = int(mask_superior.sum())
 
-        if mask_superior.any():
+        if quantidade_superiores:
             removidos_superiores = df_saneado.loc[mask_superior].copy()
             removidos_superiores.insert(0, "Rodada", rodada)
             removidos_superiores.insert(
@@ -1474,21 +1689,34 @@ def sanear_precos_por_coeficiente_variacao(
             df_saneado = df_saneado.loc[~mask_superior].copy()
             houve_remocao = True
 
+        estatisticas_depois = calcular_estatisticas_serie(
+            df_saneado[coluna_preco]
+        )
+        memoria_saneamento.append(
+            criar_registro_memoria_saneamento(
+                rodada=rodada,
+                etapa="Verificação do limite superior",
+                estatisticas_antes=estatisticas_antes,
+                limite_aplicado=limite_superior,
+                removidos=quantidade_superiores,
+                estatisticas_depois=estatisticas_depois
+            )
+        )
+
         if len(df_saneado) <= 1:
             break
 
-        estatisticas = calcular_estatisticas_serie(
-            df_saneado[coluna_preco]
-        )
-        coeficiente = estatisticas["coeficiente_variacao"]
+        coeficiente = estatisticas_depois["coeficiente_variacao"]
 
         if coeficiente is None or coeficiente <= limite_cv:
             break
 
-        limite_inferior = estatisticas["limite_inferior"]
+        estatisticas_antes = estatisticas_depois
+        limite_inferior = estatisticas_antes["limite_inferior"]
         mask_inferior = df_saneado[coluna_preco] < limite_inferior
+        quantidade_inferiores = int(mask_inferior.sum())
 
-        if mask_inferior.any():
+        if quantidade_inferiores:
             removidos_inferiores = df_saneado.loc[mask_inferior].copy()
             removidos_inferiores.insert(0, "Rodada", rodada)
             removidos_inferiores.insert(
@@ -1510,6 +1738,20 @@ def sanear_precos_por_coeficiente_variacao(
             df_saneado = df_saneado.loc[~mask_inferior].copy()
             houve_remocao = True
 
+        estatisticas_depois = calcular_estatisticas_serie(
+            df_saneado[coluna_preco]
+        )
+        memoria_saneamento.append(
+            criar_registro_memoria_saneamento(
+                rodada=rodada,
+                etapa="Verificação do limite inferior",
+                estatisticas_antes=estatisticas_antes,
+                limite_aplicado=limite_inferior,
+                removidos=quantidade_inferiores,
+                estatisticas_depois=estatisticas_depois
+            )
+        )
+
         if not houve_remocao:
             break
 
@@ -1518,7 +1760,9 @@ def sanear_precos_por_coeficiente_variacao(
     else:
         df_removidos = pd.DataFrame()
 
-    return df_saneado, df_removidos
+    df_memoria_saneamento = pd.DataFrame(memoria_saneamento)
+
+    return df_saneado, df_removidos, df_memoria_saneamento
 
 
 def renderizar_resumo_estatistico(estatisticas):
@@ -1620,7 +1864,11 @@ def exibir_estatisticas_precos(df):
         "correspondem à média menos/mais um desvio padrão amostral."
     )
 
-    df_saneado, df_outliers = sanear_precos_por_coeficiente_variacao(
+    (
+        df_saneado,
+        df_outliers,
+        df_memoria_saneamento
+    ) = sanear_precos_por_coeficiente_variacao(
         df_precos,
         coluna_preco
     )
@@ -1694,10 +1942,14 @@ def exibir_estatisticas_precos(df):
             hide_index=True
         )
 
-    estatisticas["saneadas"] = estatisticas_saneadas
-    estatisticas["registros_removidos"] = int(len(df_outliers))
-
-    return estatisticas
+    return {
+        "estatisticas_antes": estatisticas,
+        "estatisticas_depois": estatisticas_saneadas,
+        "registros_removidos": int(len(df_outliers)),
+        "df_saneado": df_saneado,
+        "df_outliers": df_outliers,
+        "df_memoria_saneamento": df_memoria_saneamento
+    }
 
 
 # ============================================================
@@ -2506,7 +2758,9 @@ with aba_principal:
                 f"{tipo_precos.lower()}_consolidado"
             )
 
-            exibir_estatisticas_precos(df_precos_analise)
+            resultado_estatistico = exibir_estatisticas_precos(
+                df_precos_analise
+            )
 
             fornecedor_col = primeira_coluna_existente(
                 df_precos_analise,
@@ -2558,6 +2812,7 @@ with aba_principal:
             excel = gerar_excel_precos_consolidados(
                 df_precos=df_precos,
                 df_precos_analise=df_precos_analise,
+                resultado_estatistico=resultado_estatistico,
                 diagnostico_precos=diagnostico_precos,
                 urls_precos=urls_precos
             )
