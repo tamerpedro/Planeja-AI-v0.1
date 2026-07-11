@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from io import BytesIO
 
+import altair as alt
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 import requests
@@ -1840,51 +1841,168 @@ def sanear_precos_por_coeficiente_variacao(
     return df_saneado, df_removidos, df_memoria_saneamento
 
 
-def renderizar_resumo_estatistico(estatisticas):
-    col1, col2, col3, col4, col5 = st.columns(5)
+def montar_tabela_resumo_estatistico(estatisticas):
+    return pd.DataFrame([
+        {
+            "Indicador": "Registros com preço",
+            "Valor": str(estatisticas["registros_com_preco"])
+        },
+        {
+            "Indicador": "Menor preço",
+            "Valor": formatar_brl(estatisticas["menor_preco"])
+        },
+        {
+            "Indicador": "Maior preço",
+            "Valor": formatar_brl(estatisticas["maior_preco"])
+        },
+        {
+            "Indicador": "Preço médio",
+            "Valor": formatar_brl(estatisticas["preco_medio"])
+        },
+        {
+            "Indicador": "Mediana",
+            "Valor": formatar_brl(estatisticas["mediana"])
+        },
+        {
+            "Indicador": "Desvio padrão",
+            "Valor": formatar_brl(estatisticas["desvio_padrao"])
+        },
+        {
+            "Indicador": "Limite superior",
+            "Valor": formatar_brl(estatisticas["limite_superior"])
+        },
+        {
+            "Indicador": "Limite inferior",
+            "Valor": formatar_brl(estatisticas["limite_inferior"])
+        },
+        {
+            "Indicador": "Coeficiente de variação",
+            "Valor": formatar_percentual(
+                estatisticas["coeficiente_variacao"]
+            )
+        }
+    ])
 
-    col1.metric(
-        "Registros com preço",
-        estatisticas["registros_com_preco"]
-    )
-    col2.metric(
-        "Menor preço",
-        formatar_brl(estatisticas["menor_preco"])
-    )
-    col3.metric(
-        "Maior preço",
-        formatar_brl(estatisticas["maior_preco"])
-    )
-    col4.metric(
-        "Preço médio",
-        formatar_brl(estatisticas["preco_medio"])
-    )
-    col5.metric(
-        "Mediana",
-        formatar_brl(estatisticas["mediana"])
+
+def montar_grafico_dispersao_precos(
+    df_precos,
+    coluna_preco,
+    estatisticas
+):
+    dados_grafico = pd.DataFrame({
+        "Observação": range(1, len(df_precos) + 1),
+        "Preço unitário": df_precos[coluna_preco].astype(float).values
+    })
+
+    pontos = (
+        alt.Chart(dados_grafico)
+        .mark_circle(
+            size=60,
+            opacity=0.72,
+            color="#2A9D8F"
+        )
+        .encode(
+            x=alt.X(
+                "Observação:Q",
+                title="Observação",
+                axis=alt.Axis(tickMinStep=1)
+            ),
+            y=alt.Y(
+                "Preço unitário:Q",
+                title="Preço unitário (R$)",
+                scale=alt.Scale(zero=False)
+            ),
+            tooltip=[
+                alt.Tooltip("Observação:Q", format=".0f"),
+                alt.Tooltip("Preço unitário:Q", format=",.2f")
+            ]
+        )
     )
 
-    col6, col7, col8, col9 = st.columns(4)
+    referencias = pd.DataFrame({
+        "Referência": [
+            "Média",
+            "Mediana",
+            "Limite superior",
+            "Limite inferior"
+        ],
+        "Valor": [
+            estatisticas["preco_medio"],
+            estatisticas["mediana"],
+            estatisticas["limite_superior"],
+            estatisticas["limite_inferior"]
+        ]
+    })
 
-    col6.metric(
-        "Desvio padrão",
-        formatar_brl(estatisticas["desvio_padrao"])
-    )
-    col7.metric(
-        "Limite superior",
-        formatar_brl(estatisticas["limite_superior"])
-    )
-    col8.metric(
-        "Limite inferior",
-        formatar_brl(estatisticas["limite_inferior"])
-    )
-    col9.metric(
-        "Coeficiente de variação",
-        formatar_percentual(estatisticas["coeficiente_variacao"])
+    linhas = (
+        alt.Chart(referencias)
+        .mark_rule(strokeWidth=2, strokeDash=[6, 4])
+        .encode(
+            y=alt.Y("Valor:Q"),
+            color=alt.Color(
+                "Referência:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=[
+                        "Média",
+                        "Mediana",
+                        "Limite superior",
+                        "Limite inferior"
+                    ],
+                    range=[
+                        "#E9C46A",
+                        "#A8A8A8",
+                        "#E76F51",
+                        "#457B9D"
+                    ]
+                ),
+                legend=alt.Legend(
+                    orient="bottom",
+                    direction="horizontal"
+                )
+            ),
+            tooltip=[
+                alt.Tooltip("Referência:N"),
+                alt.Tooltip("Valor:Q", format=",.2f")
+            ]
+        )
     )
 
+    return (
+        pontos + linhas
+    ).properties(height=330)
 
-def exibir_indicador_dispercao(estatisticas):
+
+def renderizar_resumo_estatistico(
+    df_precos,
+    coluna_preco,
+    estatisticas,
+    chave
+):
+    coluna_grafico, coluna_tabela = st.columns([2, 1], gap="large")
+
+    with coluna_grafico:
+        grafico = montar_grafico_dispersao_precos(
+            df_precos,
+            coluna_preco,
+            estatisticas
+        )
+        st.altair_chart(
+            grafico,
+            use_container_width=True,
+            key=f"grafico_dispersao_{chave}"
+        )
+
+    with coluna_tabela:
+        st.dataframe(
+            montar_tabela_resumo_estatistico(estatisticas),
+            use_container_width=True,
+            hide_index=True,
+            height=365
+        )
+
+
+def exibir_indicador_dispersao(estatisticas):
     if estatisticas["desvio_acima_25"] is None:
         st.info(
             "Não foi possível calcular o coeficiente de variação, "
@@ -1930,14 +2048,30 @@ def exibir_estatisticas_precos(df):
     estatisticas = calcular_estatisticas_serie(
         df_precos[coluna_preco]
     )
-    renderizar_resumo_estatistico(estatisticas)
-    exibir_indicador_dispercao(estatisticas)
+    renderizar_resumo_estatistico(
+        df_precos,
+        coluna_preco,
+        estatisticas,
+        chave="dados_brutos"
+    )
+    exibir_indicador_dispersao(estatisticas)
 
     st.caption(
         "Esta primeira análise preserva todos os preços válidos para "
         "memória e supervisão do usuário. Os limites inferior e superior "
         "correspondem à média menos/mais um desvio padrão amostral."
     )
+
+    if estatisticas["desvio_acima_25"] is not True:
+        return {
+            "estatisticas_antes": estatisticas,
+            "estatisticas_depois": None,
+            "saneamento_aplicado": False,
+            "registros_removidos": 0,
+            "df_saneado": pd.DataFrame(columns=df_precos.columns),
+            "df_outliers": pd.DataFrame(),
+            "df_memoria_saneamento": pd.DataFrame()
+        }
 
     (
         df_saneado,
@@ -1958,8 +2092,13 @@ def exibir_estatisticas_precos(df):
         f"{len(df_outliers)} outlier(s) removido(s)."
     )
 
-    renderizar_resumo_estatistico(estatisticas_saneadas)
-    exibir_indicador_dispercao(estatisticas_saneadas)
+    renderizar_resumo_estatistico(
+        df_saneado,
+        coluna_preco,
+        estatisticas_saneadas,
+        chave="dados_saneados"
+    )
+    exibir_indicador_dispersao(estatisticas_saneadas)
 
     st.caption(
         "O saneamento remove primeiro os preços acima do limite superior, "
@@ -1970,56 +2109,51 @@ def exibir_estatisticas_precos(df):
 
     st.subheader("Outliers removidos para as estatísticas saneadas")
 
-    if df_outliers.empty:
-        st.info(
-            "Nenhum outlier foi removido: o coeficiente de variação "
-            "já estava abaixo ou igual a 25%."
-        )
-    else:
-        colunas_auditoria = [
-            "Rodada",
-            "Critério",
-            "Limite aplicado",
-            "Coeficiente de variação antes (%)"
-        ]
-        colunas_identificacao = [
-            coluna_preco,
-            "catmat_consultado",
-            "catser_consultado",
-            "idCompra",
-            "numeroCompra",
-            "anoCompra",
-            "numeroItemCompra",
-            "descricaoItem",
-            "nomeFornecedor",
-            "nomeOrgao",
-            "dataCompra"
-        ]
-        colunas_identificacao = [
-            coluna
-            for coluna in colunas_identificacao
-            if coluna in df_outliers.columns
-        ]
-        colunas_restantes = [
-            coluna
-            for coluna in df_outliers.columns
-            if coluna not in colunas_auditoria + colunas_identificacao
-        ]
-        colunas_exibicao = (
-            colunas_auditoria
-            + colunas_identificacao
-            + colunas_restantes
-        )
+    colunas_auditoria = [
+        "Rodada",
+        "Critério",
+        "Limite aplicado",
+        "Coeficiente de variação antes (%)"
+    ]
+    colunas_identificacao = [
+        coluna_preco,
+        "catmat_consultado",
+        "catser_consultado",
+        "idCompra",
+        "numeroCompra",
+        "anoCompra",
+        "numeroItemCompra",
+        "descricaoItem",
+        "nomeFornecedor",
+        "nomeOrgao",
+        "dataCompra"
+    ]
+    colunas_identificacao = [
+        coluna
+        for coluna in colunas_identificacao
+        if coluna in df_outliers.columns
+    ]
+    colunas_restantes = [
+        coluna
+        for coluna in df_outliers.columns
+        if coluna not in colunas_auditoria + colunas_identificacao
+    ]
+    colunas_exibicao = (
+        colunas_auditoria
+        + colunas_identificacao
+        + colunas_restantes
+    )
 
-        st.dataframe(
-            df_outliers[colunas_exibicao],
-            use_container_width=True,
-            hide_index=True
-        )
+    st.dataframe(
+        df_outliers[colunas_exibicao],
+        use_container_width=True,
+        hide_index=True
+    )
 
     return {
         "estatisticas_antes": estatisticas,
         "estatisticas_depois": estatisticas_saneadas,
+        "saneamento_aplicado": True,
         "registros_removidos": int(len(df_outliers)),
         "df_saneado": df_saneado,
         "df_outliers": df_outliers,
