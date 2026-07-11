@@ -7,6 +7,7 @@ from datetime import date
 from io import BytesIO
 
 import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
 import requests
 import streamlit as st
 
@@ -127,8 +128,32 @@ def primeira_coluna_existente(df, candidatas):
 
 
 def ajustar_larguras_excel(writer):
+    preenchimento_cabecalho = PatternFill(
+        fill_type="solid",
+        fgColor="1F4E78"
+    )
+    fonte_cabecalho = Font(
+        color="FFFFFF",
+        bold=True
+    )
+
     for worksheet in writer.book.worksheets:
         worksheet.freeze_panes = "A2"
+        worksheet.sheet_view.showGridLines = False
+
+        if worksheet.max_row > 1 and worksheet.max_column > 0:
+            worksheet.auto_filter.ref = worksheet.dimensions
+
+        for celula in worksheet[1]:
+            celula.fill = preenchimento_cabecalho
+            celula.font = fonte_cabecalho
+            celula.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+        worksheet.row_dimensions[1].height = 30
 
         for coluna in worksheet.columns:
             valores = [
@@ -136,7 +161,17 @@ def ajustar_larguras_excel(writer):
                 for celula in coluna
             ]
             largura = min(max(len(valor) for valor in valores) + 2, 60)
-            worksheet.column_dimensions[coluna[0].column_letter].width = max(largura, 12)
+            worksheet.column_dimensions[coluna[0].column_letter].width = max(
+                largura,
+                12
+            )
+
+
+def arredondar_valor_excel(valor, casas=2):
+    if valor is None or pd.isna(valor):
+        return None
+
+    return round(float(valor), int(casas))
 
 
 def montar_analise_estatistica_excel(
@@ -162,50 +197,50 @@ def montar_analise_estatistica_excel(
         ),
         (
             "Menor preço",
-            estatisticas_antes["menor_preco"],
-            estatisticas_depois["menor_preco"],
+            arredondar_valor_excel(estatisticas_antes["menor_preco"]),
+            arredondar_valor_excel(estatisticas_depois["menor_preco"]),
             "R$"
         ),
         (
             "Maior preço",
-            estatisticas_antes["maior_preco"],
-            estatisticas_depois["maior_preco"],
+            arredondar_valor_excel(estatisticas_antes["maior_preco"]),
+            arredondar_valor_excel(estatisticas_depois["maior_preco"]),
             "R$"
         ),
         (
             "Preço médio",
-            estatisticas_antes["preco_medio"],
-            estatisticas_depois["preco_medio"],
+            arredondar_valor_excel(estatisticas_antes["preco_medio"]),
+            arredondar_valor_excel(estatisticas_depois["preco_medio"]),
             "R$"
         ),
         (
             "Mediana",
-            estatisticas_antes["mediana"],
-            estatisticas_depois["mediana"],
+            arredondar_valor_excel(estatisticas_antes["mediana"]),
+            arredondar_valor_excel(estatisticas_depois["mediana"]),
             "R$"
         ),
         (
             "Desvio padrão amostral",
-            estatisticas_antes["desvio_padrao"],
-            estatisticas_depois["desvio_padrao"],
+            arredondar_valor_excel(estatisticas_antes["desvio_padrao"]),
+            arredondar_valor_excel(estatisticas_depois["desvio_padrao"]),
             "R$"
         ),
         (
             "Limite superior",
-            estatisticas_antes["limite_superior"],
-            estatisticas_depois["limite_superior"],
+            arredondar_valor_excel(estatisticas_antes["limite_superior"]),
+            arredondar_valor_excel(estatisticas_depois["limite_superior"]),
             "R$"
         ),
         (
             "Limite inferior",
-            estatisticas_antes["limite_inferior"],
-            estatisticas_depois["limite_inferior"],
+            arredondar_valor_excel(estatisticas_antes["limite_inferior"]),
+            arredondar_valor_excel(estatisticas_depois["limite_inferior"]),
             "R$"
         ),
         (
             "Coeficiente de variação",
-            estatisticas_antes["coeficiente_variacao"] * 100,
-            estatisticas_depois["coeficiente_variacao"] * 100,
+            arredondar_valor_excel(estatisticas_antes["coeficiente_variacao"] * 100),
+            arredondar_valor_excel(estatisticas_depois["coeficiente_variacao"] * 100),
             "%"
         ),
         (
@@ -1614,20 +1649,24 @@ def criar_registro_memoria_saneamento(
         "Rodada": rodada,
         "Etapa": etapa,
         "Registros antes": estatisticas_antes["registros_com_preco"],
-        "Média antes": estatisticas_antes["preco_medio"],
-        "Desvio padrão antes": estatisticas_antes["desvio_padrao"],
+        "Média antes": arredondar_valor_excel(estatisticas_antes["preco_medio"]),
+        "Desvio padrão antes": arredondar_valor_excel(estatisticas_antes["desvio_padrao"]),
         "CV antes (%)": (
-            estatisticas_antes["coeficiente_variacao"] * 100
+            arredondar_valor_excel(
+                estatisticas_antes["coeficiente_variacao"] * 100
+            )
             if estatisticas_antes["coeficiente_variacao"] is not None
             else None
         ),
-        "Limite aplicado": limite_aplicado,
+        "Limite aplicado": arredondar_valor_excel(limite_aplicado),
         "Outliers removidos": int(removidos),
         "Registros depois": estatisticas_depois["registros_com_preco"],
-        "Média depois": estatisticas_depois["preco_medio"],
-        "Desvio padrão depois": estatisticas_depois["desvio_padrao"],
+        "Média depois": arredondar_valor_excel(estatisticas_depois["preco_medio"]),
+        "Desvio padrão depois": arredondar_valor_excel(estatisticas_depois["desvio_padrao"]),
         "CV depois (%)": (
-            estatisticas_depois["coeficiente_variacao"] * 100
+            arredondar_valor_excel(
+                estatisticas_depois["coeficiente_variacao"] * 100
+            )
             if estatisticas_depois["coeficiente_variacao"] is not None
             else None
         )
@@ -1678,12 +1717,12 @@ def sanear_precos_por_coeficiente_variacao(
             removidos_superiores.insert(
                 2,
                 "Limite aplicado",
-                limite_superior
+                arredondar_valor_excel(limite_superior)
             )
             removidos_superiores.insert(
                 3,
                 "Coeficiente de variação antes (%)",
-                coeficiente * 100
+                arredondar_valor_excel(coeficiente * 100)
             )
             grupos_removidos.append(removidos_superiores)
             df_saneado = df_saneado.loc[~mask_superior].copy()
@@ -1727,12 +1766,12 @@ def sanear_precos_por_coeficiente_variacao(
             removidos_inferiores.insert(
                 2,
                 "Limite aplicado",
-                limite_inferior
+                arredondar_valor_excel(limite_inferior)
             )
             removidos_inferiores.insert(
                 3,
                 "Coeficiente de variação antes (%)",
-                coeficiente * 100
+                arredondar_valor_excel(coeficiente * 100)
             )
             grupos_removidos.append(removidos_inferiores)
             df_saneado = df_saneado.loc[~mask_inferior].copy()
