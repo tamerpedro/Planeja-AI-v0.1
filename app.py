@@ -1411,7 +1411,7 @@ def exibir_estatisticas_precos(df):
         return {}
 
     preco_medio = float(df_precos[coluna_preco].mean())
-    desvio_padrao = float(df_precos[coluna_preco].std(ddof=0))
+    desvio_padrao = float(df_precos[coluna_preco].std(ddof=1))
     limite_superior = preco_medio + desvio_padrao
     limite_inferior = preco_medio - desvio_padrao
     coeficiente_variacao = (
