@@ -310,6 +310,33 @@ def formatar_abas_estatisticas_excel(writer):
                     worksheet.cell(linha, indice_coluna).number_format = '0.00'
 
 
+def preparar_dataframe_para_excel(df):
+    if df is None:
+        return pd.DataFrame()
+
+    df_excel = df.copy()
+
+    for coluna in df_excel.columns:
+        nome_coluna = str(coluna).lower()
+
+        if nome_coluna.startswith("id") or nome_coluna in {
+            "nifornecedor",
+            "cpfcnpjfornecedor",
+            "cnpjfornecedor"
+        }:
+            df_excel[coluna] = df_excel[coluna].apply(
+                lambda valor: (
+                    None
+                    if pd.isna(valor)
+                    else str(int(valor))
+                    if isinstance(valor, float) and valor.is_integer()
+                    else str(valor)
+                )
+            )
+
+    return df_excel
+
+
 def gerar_excel_precos_consolidados(
     df_precos,
     df_precos_analise,
@@ -337,20 +364,29 @@ def gerar_excel_precos_consolidados(
         resultado_estatistico.get("estatisticas_depois")
     )
 
+    df_precos_excel = preparar_dataframe_para_excel(df_precos)
+    df_precos_analise_excel = preparar_dataframe_para_excel(
+        df_precos_analise
+    )
+    df_precos_saneados_excel = preparar_dataframe_para_excel(
+        df_precos_saneados
+    )
+    df_outliers_excel = preparar_dataframe_para_excel(df_outliers)
+
     with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
-        df_precos.to_excel(
+        df_precos_excel.to_excel(
             writer,
             sheet_name="precos_consolidados",
             index=False
         )
 
-        df_precos_analise.to_excel(
+        df_precos_analise_excel.to_excel(
             writer,
             sheet_name="precos_para_analise",
             index=False
         )
 
-        df_precos_saneados.to_excel(
+        df_precos_saneados_excel.to_excel(
             writer,
             sheet_name="precos_saneados",
             index=False
@@ -362,7 +398,7 @@ def gerar_excel_precos_consolidados(
             index=False
         )
 
-        df_outliers.to_excel(
+        df_outliers_excel.to_excel(
             writer,
             sheet_name="outliers_removidos",
             index=False
