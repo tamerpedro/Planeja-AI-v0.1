@@ -1390,6 +1390,199 @@ def aplicar_filtro_unidade_fornecimento(df, chave):
     return df_filtrado.drop(columns=[coluna_unidade_resumo])
 
 
+def calcular_estatisticas_serie(serie_precos):
+    precos = pd.to_numeric(serie_precos, errors="coerce").dropna()
+
+    if precos.empty:
+        return None
+
+    preco_medio = float(precos.mean())
+    desvio_padrao = float(precos.std(ddof=1)) if len(precos) > 1 else 0.0
+    coeficiente_variacao = (
+        desvio_padrao / preco_medio
+        if preco_medio > 0
+        else None
+    )
+
+    return {
+        "registros_com_preco": int(len(precos)),
+        "menor_preco": float(precos.min()),
+        "maior_preco": float(precos.max()),
+        "preco_medio": preco_medio,
+        "mediana": float(precos.median()),
+        "desvio_padrao": desvio_padrao,
+        "limite_superior": preco_medio + desvio_padrao,
+        "limite_inferior": preco_medio - desvio_padrao,
+        "coeficiente_variacao": coeficiente_variacao,
+        "desvio_acima_25": (
+            coeficiente_variacao > 0.25
+            if coeficiente_variacao is not None
+            else None
+        )
+    }
+
+
+def sanear_precos_por_coeficiente_variacao(
+    df,
+    coluna_preco,
+    limite_cv=0.25
+):
+    df_saneado = df.copy()
+    df_saneado[coluna_preco] = pd.to_numeric(
+        df_saneado[coluna_preco],
+        errors="coerce"
+    )
+    df_saneado = df_saneado.dropna(subset=[coluna_preco]).copy()
+
+    grupos_removidos = []
+    rodada = 0
+
+    while len(df_saneado) > 1:
+        estatisticas = calcular_estatisticas_serie(
+            df_saneado[coluna_preco]
+        )
+        coeficiente = estatisticas["coeficiente_variacao"]
+
+        if coeficiente is None or coeficiente <= limite_cv:
+            break
+
+        rodada += 1
+        houve_remocao = False
+
+        limite_superior = estatisticas["limite_superior"]
+        mask_superior = df_saneado[coluna_preco] > limite_superior
+
+        if mask_superior.any():
+            removidos_superiores = df_saneado.loc[mask_superior].copy()
+            removidos_superiores.insert(0, "Rodada", rodada)
+            removidos_superiores.insert(
+                1,
+                "Critério",
+                "Acima do limite superior"
+            )
+            removidos_superiores.insert(
+                2,
+                "Limite aplicado",
+                limite_superior
+            )
+            removidos_superiores.insert(
+                3,
+                "Coeficiente de variação antes (%)",
+                coeficiente * 100
+            )
+            grupos_removidos.append(removidos_superiores)
+            df_saneado = df_saneado.loc[~mask_superior].copy()
+            houve_remocao = True
+
+        if len(df_saneado) <= 1:
+            break
+
+        estatisticas = calcular_estatisticas_serie(
+            df_saneado[coluna_preco]
+        )
+        coeficiente = estatisticas["coeficiente_variacao"]
+
+        if coeficiente is None or coeficiente <= limite_cv:
+            break
+
+        limite_inferior = estatisticas["limite_inferior"]
+        mask_inferior = df_saneado[coluna_preco] < limite_inferior
+
+        if mask_inferior.any():
+            removidos_inferiores = df_saneado.loc[mask_inferior].copy()
+            removidos_inferiores.insert(0, "Rodada", rodada)
+            removidos_inferiores.insert(
+                1,
+                "Critério",
+                "Abaixo do limite inferior"
+            )
+            removidos_inferiores.insert(
+                2,
+                "Limite aplicado",
+                limite_inferior
+            )
+            removidos_inferiores.insert(
+                3,
+                "Coeficiente de variação antes (%)",
+                coeficiente * 100
+            )
+            grupos_removidos.append(removidos_inferiores)
+            df_saneado = df_saneado.loc[~mask_inferior].copy()
+            houve_remocao = True
+
+        if not houve_remocao:
+            break
+
+    if grupos_removidos:
+        df_removidos = pd.concat(grupos_removidos, ignore_index=True)
+    else:
+        df_removidos = pd.DataFrame()
+
+    return df_saneado, df_removidos
+
+
+def renderizar_resumo_estatistico(estatisticas):
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    col1.metric(
+        "Registros com preço",
+        estatisticas["registros_com_preco"]
+    )
+    col2.metric(
+        "Menor preço",
+        formatar_brl(estatisticas["menor_preco"])
+    )
+    col3.metric(
+        "Maior preço",
+        formatar_brl(estatisticas["maior_preco"])
+    )
+    col4.metric(
+        "Preço médio",
+        formatar_brl(estatisticas["preco_medio"])
+    )
+    col5.metric(
+        "Mediana",
+        formatar_brl(estatisticas["mediana"])
+    )
+
+    col6, col7, col8, col9 = st.columns(4)
+
+    col6.metric(
+        "Desvio padrão",
+        formatar_brl(estatisticas["desvio_padrao"])
+    )
+    col7.metric(
+        "Limite superior",
+        formatar_brl(estatisticas["limite_superior"])
+    )
+    col8.metric(
+        "Limite inferior",
+        formatar_brl(estatisticas["limite_inferior"])
+    )
+    col9.metric(
+        "Coeficiente de variação",
+        formatar_percentual(estatisticas["coeficiente_variacao"])
+    )
+
+
+def exibir_indicador_dispercao(estatisticas):
+    if estatisticas["desvio_acima_25"] is None:
+        st.info(
+            "Não foi possível calcular o coeficiente de variação, "
+            "pois o preço médio é zero ou inválido."
+        )
+    elif estatisticas["desvio_acima_25"]:
+        st.warning(
+            "Indicador de dispersão: o coeficiente de variação está "
+            "acima de 25%."
+        )
+    else:
+        st.success(
+            "Indicador de dispersão: o coeficiente de variação está "
+            "abaixo ou igual a 25%."
+        )
+
+
 def exibir_estatisticas_precos(df):
     st.subheader("Resumo estatístico dos preços")
 
@@ -1399,81 +1592,110 @@ def exibir_estatisticas_precos(df):
     )
 
     if coluna_preco is None:
-        st.warning("Não foi encontrada coluna de preço unitário no retorno da API.")
+        st.warning(
+            "Não foi encontrada coluna de preço unitário no retorno da API."
+        )
         return {}
 
     df_calc = df.copy()
-    df_calc[coluna_preco] = pd.to_numeric(df_calc[coluna_preco], errors="coerce")
-    df_precos = df_calc.dropna(subset=[coluna_preco])
+    df_calc[coluna_preco] = pd.to_numeric(
+        df_calc[coluna_preco],
+        errors="coerce"
+    )
+    df_precos = df_calc.dropna(subset=[coluna_preco]).copy()
 
     if df_precos.empty:
         st.warning("Não há preços válidos para cálculo estatístico.")
         return {}
 
-    preco_medio = float(df_precos[coluna_preco].mean())
-    desvio_padrao = float(df_precos[coluna_preco].std(ddof=1))
-    limite_superior = preco_medio + desvio_padrao
-    limite_inferior = preco_medio - desvio_padrao
-    coeficiente_variacao = (
-        desvio_padrao / preco_medio
-        if preco_medio > 0
-        else None
+    estatisticas = calcular_estatisticas_serie(
+        df_precos[coluna_preco]
     )
-    desvio_acima_25 = (
-        coeficiente_variacao > 0.25
-        if coeficiente_variacao is not None
-        else None
-    )
-
-    estatisticas = {
-        "registros_com_preco": int(len(df_precos)),
-        "menor_preco": float(df_precos[coluna_preco].min()),
-        "maior_preco": float(df_precos[coluna_preco].max()),
-        "preco_medio": preco_medio,
-        "mediana": float(df_precos[coluna_preco].median()),
-        "desvio_padrao": desvio_padrao,
-        "limite_superior": limite_superior,
-        "limite_inferior": limite_inferior,
-        "coeficiente_variacao": coeficiente_variacao,
-        "desvio_acima_25": desvio_acima_25
-    }
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    col1.metric("Registros com preço", estatisticas["registros_com_preco"])
-    col2.metric("Menor preço", formatar_brl(estatisticas["menor_preco"]))
-    col3.metric("Maior preço", formatar_brl(estatisticas["maior_preco"]))
-    col4.metric("Preço médio", formatar_brl(estatisticas["preco_medio"]))
-    col5.metric("Mediana", formatar_brl(estatisticas["mediana"]))
-
-    col6, col7, col8, col9 = st.columns(4)
-
-    col6.metric("Desvio padrão", formatar_brl(estatisticas["desvio_padrao"]))
-    col7.metric("Limite superior", formatar_brl(estatisticas["limite_superior"]))
-    col8.metric("Limite inferior", formatar_brl(estatisticas["limite_inferior"]))
-    col9.metric(
-        "Desvio vs preço médio",
-        formatar_percentual(estatisticas["coeficiente_variacao"])
-    )
-
-    if estatisticas["desvio_acima_25"] is None:
-        st.info(
-            "Não foi possível comparar o desvio padrão com 25% do preço médio, pois o preço médio é zero ou inválido."
-        )
-    elif estatisticas["desvio_acima_25"]:
-        st.warning(
-            "Indicador de dispersão: o desvio padrão está acima de 25% do preço médio."
-        )
-    else:
-        st.success(
-            "Indicador de dispersão: o desvio padrão está abaixo ou igual a 25% do preço médio."
-        )
+    renderizar_resumo_estatistico(estatisticas)
+    exibir_indicador_dispercao(estatisticas)
 
     st.caption(
-        "A média pode ser distorcida por outliers. Para planejamento preliminar, "
-        "a mediana tende a ser uma referência mais robusta. Os limites inferior e "
-        "superior correspondem à média menos/mais um desvio padrão."
+        "Esta primeira análise preserva todos os preços válidos para "
+        "memória e supervisão do usuário. Os limites inferior e superior "
+        "correspondem à média menos/mais um desvio padrão amostral."
     )
+
+    df_saneado, df_outliers = sanear_precos_por_coeficiente_variacao(
+        df_precos,
+        coluna_preco
+    )
+    estatisticas_saneadas = calcular_estatisticas_serie(
+        df_saneado[coluna_preco]
+    )
+
+    st.divider()
+    st.subheader("Resumo estatístico com dados saneados")
+    st.write(
+        f"{len(df_saneado)} registro(s) considerado(s) e "
+        f"{len(df_outliers)} outlier(s) removido(s)."
+    )
+
+    renderizar_resumo_estatistico(estatisticas_saneadas)
+    exibir_indicador_dispercao(estatisticas_saneadas)
+
+    st.caption(
+        "O saneamento remove primeiro os preços acima do limite superior, "
+        "recalcula as estatísticas e, se necessário, remove os preços abaixo "
+        "do novo limite inferior. As rodadas continuam até o coeficiente de "
+        "variação ficar abaixo ou igual a 25%, ou até não haver novo outlier."
+    )
+
+    st.subheader("Outliers removidos para as estatísticas saneadas")
+
+    if df_outliers.empty:
+        st.info(
+            "Nenhum outlier foi removido: o coeficiente de variação "
+            "já estava abaixo ou igual a 25%."
+        )
+    else:
+        colunas_auditoria = [
+            "Rodada",
+            "Critério",
+            "Limite aplicado",
+            "Coeficiente de variação antes (%)"
+        ]
+        colunas_identificacao = [
+            coluna_preco,
+            "catmat_consultado",
+            "catser_consultado",
+            "idCompra",
+            "numeroCompra",
+            "anoCompra",
+            "numeroItemCompra",
+            "descricaoItem",
+            "nomeFornecedor",
+            "nomeOrgao",
+            "dataCompra"
+        ]
+        colunas_identificacao = [
+            coluna
+            for coluna in colunas_identificacao
+            if coluna in df_outliers.columns
+        ]
+        colunas_restantes = [
+            coluna
+            for coluna in df_outliers.columns
+            if coluna not in colunas_auditoria + colunas_identificacao
+        ]
+        colunas_exibicao = (
+            colunas_auditoria
+            + colunas_identificacao
+            + colunas_restantes
+        )
+
+        st.dataframe(
+            df_outliers[colunas_exibicao],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    estatisticas["saneadas"] = estatisticas_saneadas
+    estatisticas["registros_removidos"] = int(len(df_outliers))
 
     return estatisticas
 
