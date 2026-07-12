@@ -1889,9 +1889,16 @@ def montar_grafico_dispersao_precos(
     coluna_preco,
     estatisticas
 ):
+    precos_ordenados = (
+        pd.to_numeric(df_precos[coluna_preco], errors="coerce")
+        .dropna()
+        .sort_values()
+        .reset_index(drop=True)
+    )
+
     dados_grafico = pd.DataFrame({
-        "Observação": range(1, len(df_precos) + 1),
-        "Preço unitário": df_precos[coluna_preco].astype(float).values
+        "Posição": range(1, len(precos_ordenados) + 1),
+        "Preço unitário": precos_ordenados
     })
 
     pontos = (
@@ -1903,8 +1910,8 @@ def montar_grafico_dispersao_precos(
         )
         .encode(
             x=alt.X(
-                "Observação:Q",
-                title="Observação",
+                "Posição:Q",
+                title="Preços em ordem crescente",
                 axis=alt.Axis(tickMinStep=1)
             ),
             y=alt.Y(
@@ -1913,8 +1920,16 @@ def montar_grafico_dispersao_precos(
                 scale=alt.Scale(zero=False)
             ),
             tooltip=[
-                alt.Tooltip("Observação:Q", format=".0f"),
-                alt.Tooltip("Preço unitário:Q", format=",.2f")
+                alt.Tooltip(
+                    "Posição:Q",
+                    title="Posição",
+                    format=".0f"
+                ),
+                alt.Tooltip(
+                    "Preço unitário:Q",
+                    title="Preço unitário",
+                    format=",.2f"
+                )
             ]
         )
     )
