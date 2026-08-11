@@ -1104,6 +1104,130 @@ def carregar_itens_por_pdm(
     )
 
 
+def montar_params_codigo_item_catalogo(tipo_catalogo, codigo):
+    if tipo_catalogo == "servico":
+        return {
+            "codigoItemCatalogo": int(codigo)
+        }
+
+    return {
+        "tipo": "codigoItemCatalogo",
+        "codigo": str(int(codigo))
+    }
+
+
+def consultar_preco_item_catalogo(
+    codigo,
+    data_inicial,
+    data_final,
+    endpoint,
+    data_inicio_param,
+    data_fim_param,
+    coluna_codigo_consultado,
+    tipo_catalogo,
+    max_paginas_por_item,
+    tamanho_pagina
+):
+    params_base = montar_params_codigo_item_catalogo(tipo_catalogo, codigo)
+    adicionar_parametros_data(
+        params_base,
+        data_inicio_param,
+        data_fim_param,
+        data_inicial,
+        data_final
+    )
+
+    resultados, erros, total_registros, total_paginas, urls_consultadas = consultar_paginas(
+        endpoint=endpoint,
+        params_base=params_base,
+        tamanho_pagina=int(tamanho_pagina),
+        max_paginas=int(max_paginas_por_item),
+        timeout=120,
+        tentativas_por_pagina=3,
+        pular_pagina_com_erro=True
+    )
+
+    consulta_ampliada = False
+    data_inicio_api = data_inicial
+    data_fim_api = data_final
+    url_consulta_usada = urls_consultadas[0] if urls_consultadas else None
+    registros_retornados_api = len(resultados)
+    resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
+        resultados,
+        data_inicial,
+        data_final
+    )
+
+    if not resultados:
+        for data_inicio_fallback, data_fim_fallback in criar_janelas_consulta_ampliada(
+            data_inicial,
+            data_final
+        ):
+            params_fallback = montar_params_codigo_item_catalogo(tipo_catalogo, codigo)
+            adicionar_parametros_data(
+                params_fallback,
+                data_inicio_param,
+                data_fim_param,
+                data_inicio_fallback,
+                data_fim_fallback
+            )
+
+            (
+                resultados_fallback,
+                erros_fallback,
+                total_registros_fallback,
+                total_paginas_fallback,
+                urls_fallback
+            ) = consultar_paginas(
+                endpoint=endpoint,
+                params_base=params_fallback,
+                tamanho_pagina=int(tamanho_pagina),
+                max_paginas=int(max_paginas_por_item),
+                timeout=120,
+                tentativas_por_pagina=3,
+                pular_pagina_com_erro=True
+            )
+
+            resultados_fallback_filtrados, removidos_fallback = filtrar_resultados_por_data_compra(
+                resultados_fallback,
+                data_inicial,
+                data_final
+            )
+
+            if resultados_fallback_filtrados:
+                resultados = resultados_fallback_filtrados
+                erros.extend(erros_fallback)
+                urls_consultadas.extend(urls_fallback)
+                total_registros = total_registros_fallback
+                total_paginas = total_paginas_fallback
+                registros_retornados_api = len(resultados_fallback)
+                removidos_por_periodo = removidos_fallback
+                consulta_ampliada = True
+                data_inicio_api = data_inicio_fallback
+                data_fim_api = data_fim_fallback
+                url_consulta_usada = urls_fallback[0] if urls_fallback else url_consulta_usada
+                break
+
+    diagnostico = {
+        "tipo": "CATSER" if tipo_catalogo == "servico" else "CATMAT",
+        "codigo": int(codigo),
+        "totalRegistrosAPI": total_registros,
+        "totalPaginasAPI": total_paginas,
+        "registrosRetornadosNasPaginas": registros_retornados_api,
+        "registrosAposFiltroData": len(resultados),
+        "removidosPorFiltroData": removidos_por_periodo,
+        "consultaAmpliada": consulta_ampliada,
+        "dataInicioConsultaAPI": formatar_data_diagnostico(data_inicio_api),
+        "dataFimConsultaAPI": formatar_data_diagnostico(data_fim_api),
+        "urlPrimeiraPagina": url_consulta_usada
+    }
+
+    for item in resultados:
+        item[coluna_codigo_consultado] = int(codigo)
+
+    return resultados, erros, urls_consultadas, diagnostico
+
+
 def consultar_precos_multiplos_itens_catalogo(
     codigos_itens,
     data_inicial,
@@ -1111,20 +1235,16 @@ def consultar_precos_multiplos_itens_catalogo(
     tipo_catalogo="material",
     max_paginas_por_item=2,
     tamanho_pagina=50,
-    retornar_diagnostico=False
+    retornar_diagnostico=False,
+    max_workers=6
 ):
-    todos_resultados = []
-    todos_erros = []
-    urls = []
-    diagnosticos = []
-
     total = len(codigos_itens)
 
     if total == 0:
         if retornar_diagnostico:
-            return todos_resultados, todos_erros, urls, diagnosticos
+            return [], [], [], []
 
-        return todos_resultados, todos_erros, urls
+        return [], [], []
 
     if tipo_catalogo == "servico":
         endpoint = "/modulo-pesquisa-preco/3_consultarServico"
@@ -1138,115 +1258,48 @@ def consultar_precos_multiplos_itens_catalogo(
         coluna_codigo_consultado = "catmat_consultado"
 
     progresso = st.progress(0)
+    texto_progresso = st.empty()
+    resultados_por_indice = [None] * total
+    concluidos = 0
 
-    for i, codigo in enumerate(codigos_itens):
-        params_base = {
-            "codigoItemCatalogo": int(codigo)
-        }
-        adicionar_parametros_data(
-            params_base,
-            data_inicio_param,
-            data_fim_param,
-            data_inicial,
-            data_final
-        )
-
-        resultados, erros, total_registros, total_paginas, urls_consultadas = consultar_paginas(
-            endpoint=endpoint,
-            params_base=params_base,
-            tamanho_pagina=int(tamanho_pagina),
-            max_paginas=int(max_paginas_por_item),
-            timeout=120,
-            tentativas_por_pagina=3,
-            pular_pagina_com_erro=True
-        )
-
-        consulta_ampliada = False
-        data_inicio_api = data_inicial
-        data_fim_api = data_final
-        url_consulta_usada = urls_consultadas[0] if urls_consultadas else None
-        registros_retornados_api = len(resultados)
-        resultados, removidos_por_periodo = filtrar_resultados_por_data_compra(
-            resultados,
-            data_inicial,
-            data_final
-        )
-
-        if not resultados:
-            for data_inicio_fallback, data_fim_fallback in criar_janelas_consulta_ampliada(
+    with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+        futuros = {
+            executor.submit(
+                consultar_preco_item_catalogo,
+                codigo,
                 data_inicial,
-                data_final
-            ):
-                params_fallback = {
-                    "codigoItemCatalogo": int(codigo)
-                }
-                adicionar_parametros_data(
-                    params_fallback,
-                    data_inicio_param,
-                    data_fim_param,
-                    data_inicio_fallback,
-                    data_fim_fallback
-                )
+                data_final,
+                endpoint,
+                data_inicio_param,
+                data_fim_param,
+                coluna_codigo_consultado,
+                tipo_catalogo,
+                max_paginas_por_item,
+                tamanho_pagina
+            ): indice
+            for indice, codigo in enumerate(codigos_itens)
+        }
 
-                (
-                    resultados_fallback,
-                    erros_fallback,
-                    total_registros_fallback,
-                    total_paginas_fallback,
-                    urls_fallback
-                ) = consultar_paginas(
-                    endpoint=endpoint,
-                    params_base=params_fallback,
-                    tamanho_pagina=int(tamanho_pagina),
-                    max_paginas=int(max_paginas_por_item),
-                    timeout=120,
-                    tentativas_por_pagina=3,
-                    pular_pagina_com_erro=True
-                )
+        for futuro in as_completed(futuros):
+            indice = futuros[futuro]
+            resultados_por_indice[indice] = futuro.result()
 
-                resultados_fallback_filtrados, removidos_fallback = filtrar_resultados_por_data_compra(
-                    resultados_fallback,
-                    data_inicial,
-                    data_final
-                )
+            concluidos += 1
+            progresso.progress(concluidos / total)
+            texto_progresso.caption(f"{concluidos} de {total} itens consultados.")
 
-                if resultados_fallback_filtrados:
-                    resultados = resultados_fallback_filtrados
-                    erros.extend(erros_fallback)
-                    urls_consultadas.extend(urls_fallback)
-                    total_registros = total_registros_fallback
-                    total_paginas = total_paginas_fallback
-                    registros_retornados_api = len(resultados_fallback)
-                    removidos_por_periodo = removidos_fallback
-                    consulta_ampliada = True
-                    data_inicio_api = data_inicio_fallback
-                    data_fim_api = data_fim_fallback
-                    url_consulta_usada = urls_fallback[0] if urls_fallback else url_consulta_usada
-                    break
+    texto_progresso.empty()
 
-        diagnosticos.append({
-            "tipo": "CATSER" if tipo_catalogo == "servico" else "CATMAT",
-            "codigo": int(codigo),
-            "totalRegistrosAPI": total_registros,
-            "totalPaginasAPI": total_paginas,
-            "registrosRetornadosNasPaginas": registros_retornados_api,
-            "registrosAposFiltroData": len(resultados),
-            "removidosPorFiltroData": removidos_por_periodo,
-            "consultaAmpliada": consulta_ampliada,
-            "dataInicioConsultaAPI": formatar_data_diagnostico(data_inicio_api),
-            "dataFimConsultaAPI": formatar_data_diagnostico(data_fim_api),
-            "urlPrimeiraPagina": url_consulta_usada
-        })
+    todos_resultados = []
+    todos_erros = []
+    urls = []
+    diagnosticos = []
 
-        for item in resultados:
-            item[coluna_codigo_consultado] = int(codigo)
-
+    for resultados, erros, urls_consultadas, diagnostico in resultados_por_indice:
         todos_resultados.extend(resultados)
         todos_erros.extend(erros)
         urls.extend(urls_consultadas)
-
-        progresso.progress((i + 1) / total)
-        time.sleep(0.2)
+        diagnosticos.append(diagnostico)
 
     if retornar_diagnostico:
         return todos_resultados, todos_erros, urls, diagnosticos
