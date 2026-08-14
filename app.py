@@ -2,8 +2,8 @@
 import re
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from datetime import date, timedelta
 from io import BytesIO
 
 import altair as alt
@@ -23,6 +23,14 @@ st.set_page_config(
 )
 
 BASE_URL = "https://dadosabertos.compras.gov.br"
+URL_ACOMPANHAMENTO_COMPRA = (
+    "https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/"
+    "compras/acompanhamento-compra?compra={id_compra}"
+)
+URL_ACOMPANHAMENTO_ITEM_COMPRA = (
+    "https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/"
+    "compras/acompanhamento-compra/item/{numero_item}?compra={id_compra}"
+)
 TIPO_MATERIAL = "Produto/material (CATMAT)"
 TIPO_SERVICO = "Serviço (CATSER)"
 STOPWORDS_BUSCA = {
@@ -115,6 +123,102 @@ def parsear_codigos_catalogo(texto):
             valores_invalidos.append(parte)
 
     return list(dict.fromkeys(codigos)), valores_invalidos
+
+
+LIMITE_INTEIRO_EXATO_FLOAT = 2 ** 53
+
+
+def normalizar_inteiro_para_url(valor):
+    if valor is None or pd.isna(valor):
+        return None
+
+    if isinstance(valor, float):
+        if not valor.is_integer() or abs(valor) > LIMITE_INTEIRO_EXATO_FLOAT:
+            # Acima desse limite o float64 pode ter perdido precisao do
+            # inteiro original (idCompra costuma ter 17+ digitos), entao
+            # e mais seguro nao gerar link do que gerar um link errado.
+            return None
+
+        valor = int(valor)
+
+    valor_texto = str(valor).strip()
+
+    if not valor_texto.isdigit():
+        return None
+
+    return valor_texto
+
+
+def montar_link_acompanhamento_compra(id_compra):
+    id_compra_texto = normalizar_inteiro_para_url(id_compra)
+
+    if id_compra_texto is None:
+        return None
+
+    return URL_ACOMPANHAMENTO_COMPRA.format(id_compra=id_compra_texto)
+
+
+def montar_link_propostas_item(id_compra, numero_item_compra):
+    id_compra_texto = normalizar_inteiro_para_url(id_compra)
+    numero_item_texto = normalizar_inteiro_para_url(numero_item_compra)
+
+    if id_compra_texto is None or numero_item_texto is None:
+        return None
+
+    return URL_ACOMPANHAMENTO_ITEM_COMPRA.format(
+        id_compra=id_compra_texto,
+        numero_item=numero_item_texto
+    )
+
+
+COLUNA_SITUACAO_PNCP = "Situação PNCP"
+COLUNA_LINK_ACOMPANHAMENTO_COMPRA = "Acompanhar compra"
+COLUNA_LINK_PROPOSTAS_ITEM = "Propostas Item"
+
+
+def montar_colunas_extras_compra(df):
+    """
+    Insere, logo apos idCompra e nessa ordem, as colunas
+    'Situação PNCP', 'Acompanhar compra' e 'Propostas Item', quando os
+    campos de origem existirem no DataFrame.
+    """
+    if df is None or df.empty or "idCompra" not in df.columns:
+        return df
+
+    df_extra = df.copy()
+    posicao = df_extra.columns.get_loc("idCompra") + 1
+
+    if COLUNA_SITUACAO_PNCP in df_extra.columns:
+        colunas_ordenadas = [
+            coluna
+            for coluna in df_extra.columns
+            if coluna != COLUNA_SITUACAO_PNCP
+        ]
+        colunas_ordenadas.insert(posicao, COLUNA_SITUACAO_PNCP)
+        df_extra = df_extra[colunas_ordenadas]
+        posicao += 1
+
+    df_extra.insert(
+        posicao,
+        COLUNA_LINK_ACOMPANHAMENTO_COMPRA,
+        df_extra["idCompra"].apply(montar_link_acompanhamento_compra)
+    )
+    posicao += 1
+
+    if "numeroItemCompra" in df_extra.columns:
+        df_extra.insert(
+            posicao,
+            COLUNA_LINK_PROPOSTAS_ITEM,
+            df_extra.apply(
+                lambda linha: montar_link_propostas_item(
+                    linha["idCompra"],
+                    linha["numeroItemCompra"]
+                ),
+                axis=1
+            )
+        )
+
+    return df_extra
 
 
 def primeira_coluna_existente(df, candidatas):
@@ -311,11 +415,34 @@ def formatar_abas_estatisticas_excel(writer):
                     worksheet.cell(linha, indice_coluna).number_format = '0.00'
 
 
+def aplicar_hyperlinks_colunas_link_excel(writer, nomes_colunas):
+    for worksheet in writer.book.worksheets:
+        cabecalhos = {
+            celula.value: celula.column
+            for celula in worksheet[1]
+        }
+
+        for nome_coluna in nomes_colunas:
+            indice_coluna = cabecalhos.get(nome_coluna)
+
+            if not indice_coluna:
+                continue
+
+            for linha in range(2, worksheet.max_row + 1):
+                celula = worksheet.cell(linha, indice_coluna)
+                link = celula.value
+
+                if link:
+                    celula.hyperlink = link
+                    celula.value = "Abrir"
+                    celula.style = "Hyperlink"
+
+
 def preparar_dataframe_para_excel(df):
     if df is None:
         return pd.DataFrame()
 
-    df_excel = df.copy()
+    df_excel = montar_colunas_extras_compra(df).copy()
 
     for coluna in df_excel.columns:
         nome_coluna = str(coluna).lower()
@@ -425,6 +552,10 @@ def gerar_excel_precos_consolidados(
                 index=False
             )
 
+        aplicar_hyperlinks_colunas_link_excel(
+            writer,
+            [COLUNA_LINK_ACOMPANHAMENTO_COMPRA, COLUNA_LINK_PROPOSTAS_ITEM]
+        )
         formatar_abas_estatisticas_excel(writer)
         ajustar_larguras_excel(writer)
 
@@ -1228,6 +1359,292 @@ def consultar_preco_item_catalogo(
     return resultados, erros, urls_consultadas, diagnostico
 
 
+def montar_janela_situacao_pncp(data_final):
+    """
+    A publicação no PNCP (dataInclusaoPncp) costuma ocorrer antes da
+    dataCompra do preço praticado — às vezes meses antes, como em atas de
+    registro de preços consultadas muito depois de publicadas. Por isso a
+    janela ignora o data_inicial escolhido para a pesquisa de preços e usa
+    sempre os 365 dias anteriores à data final (limite máximo aceito pela
+    API), maximizando a chance de encontrar a situação real do item.
+    """
+    hoje = date.today()
+
+    if data_final is not None:
+        fim = min(pd.to_datetime(data_final).date(), hoje)
+    else:
+        fim = hoje
+
+    inicio = fim - timedelta(days=364)
+
+    return inicio, fim
+
+
+ORCAMENTO_TEMPO_SITUACAO_PNCP_SEGUNDOS = 30
+ORCAMENTO_TEMPO_SITUACAO_PNCP_FALLBACK_SEGUNDOS = 20
+ORCAMENTO_TEMPO_SITUACAO_PNCP_UASG_SEGUNDOS = 360
+# Consultas por UASG sao independentes e simples (GET unico por orgao), entao
+# vale a pena um paralelismo bem maior que o resto do app para conseguir
+# cobrir centenas de orgaos distintos dentro do orcamento de tempo.
+MAX_WORKERS_SITUACAO_PNCP_UASG = 20
+
+
+def consultar_situacao_itens_pncp(
+    codigo_item_catalogo,
+    data_inicial_situacao,
+    data_final_situacao,
+    max_paginas=2,
+    tamanho_pagina=100
+):
+    params_base = {
+        "codItemCatalogo": int(codigo_item_catalogo),
+        "dataInclusaoPncpInicial": data_inicial_situacao.strftime("%Y-%m-%d"),
+        "dataInclusaoPncpFinal": data_final_situacao.strftime("%Y-%m-%d")
+    }
+
+    # Timeout curto e sem retentativa: essa consulta e um enriquecimento
+    # best-effort e nao pode travar a tela inteira se a API do PNCP_14133
+    # estiver lenta/instavel para um codigo especifico.
+    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
+        endpoint="/modulo-contratacoes/2_consultarItensContratacoes_PNCP_14133",
+        params_base=params_base,
+        tamanho_pagina=int(tamanho_pagina),
+        max_paginas=int(max_paginas),
+        timeout=15,
+        tentativas_por_pagina=1,
+        pular_pagina_com_erro=True,
+        pausa_entre_paginas=0
+    )
+
+    return {
+        str(item["idCompraItem"]): item.get("situacaoCompraItemNome")
+        for item in resultados
+        if item.get("idCompraItem")
+    }
+
+
+def consultar_situacao_itens_pncp_por_uasg(
+    codigo_uasg,
+    data_inicial_situacao,
+    data_final_situacao,
+    max_paginas=2,
+    tamanho_pagina=100
+):
+    """
+    Fallback para itens cujo codItemCatalogo esta nulo no lado do PNCP
+    (acontece em alguns registros, sobretudo de Dispensa Eletronica) -- nesse
+    caso a busca por codigo de catalogo nunca encontra o item, mesmo dentro
+    da janela de datas correta. Busca por UASG e casa o resultado pelo
+    idCompraItem, que e confiavel em ambos os lados.
+    """
+    params_base = {
+        "unidadeOrgaoCodigoUnidade": str(codigo_uasg),
+        "dataInclusaoPncpInicial": data_inicial_situacao.strftime("%Y-%m-%d"),
+        "dataInclusaoPncpFinal": data_final_situacao.strftime("%Y-%m-%d")
+    }
+
+    resultados, erros, total_registros, total_paginas, urls = consultar_paginas(
+        endpoint="/modulo-contratacoes/2_consultarItensContratacoes_PNCP_14133",
+        params_base=params_base,
+        tamanho_pagina=int(tamanho_pagina),
+        max_paginas=int(max_paginas),
+        timeout=15,
+        tentativas_por_pagina=1,
+        pular_pagina_com_erro=True,
+        pausa_entre_paginas=0
+    )
+
+    return {
+        str(item["idCompraItem"]): item.get("situacaoCompraItemNome")
+        for item in resultados
+        if item.get("idCompraItem")
+    }
+
+
+def consultar_situacoes_pncp_lote(
+    chaves,
+    funcao_consulta,
+    data_inicial_situacao,
+    data_final_situacao,
+    max_workers,
+    orcamento_segundos,
+    rotulo_janela
+):
+    total_chaves = len(chaves)
+    situacoes = {}
+
+    if total_chaves == 0:
+        return situacoes
+
+    progresso_situacao = st.progress(0)
+    texto_progresso_situacao = st.empty()
+    texto_progresso_situacao.caption(
+        f"Consultando situação PNCP ({rotulo_janela}) para {total_chaves} "
+        "item(ns)..."
+    )
+
+    concluidos = 0
+    tempo_limite = time.monotonic() + orcamento_segundos
+
+    # Nao usa "with" aqui de proposito: se o orcamento de tempo estourar,
+    # queremos seguir em frente sem esperar as threads pendentes terminarem
+    # (shutdown(wait=False)), em vez do "with" bloquear ate elas acabarem.
+    executor = ThreadPoolExecutor(max_workers=int(max_workers))
+
+    try:
+        pendentes = {
+            executor.submit(
+                funcao_consulta,
+                chave,
+                data_inicial_situacao,
+                data_final_situacao
+            )
+            for chave in chaves
+        }
+
+        while pendentes:
+            tempo_restante = tempo_limite - time.monotonic()
+
+            if tempo_restante <= 0:
+                texto_progresso_situacao.caption(
+                    f"Situação PNCP ({rotulo_janela}): tempo esgotado, "
+                    f"{len(pendentes)} de {total_chaves} item(ns) não "
+                    "consultados a tempo."
+                )
+                break
+
+            prontos, pendentes = wait(
+                pendentes,
+                timeout=tempo_restante,
+                return_when=FIRST_COMPLETED
+            )
+
+            for futuro in prontos:
+                try:
+                    situacoes.update(futuro.result())
+                except Exception:
+                    pass
+
+                concluidos += 1
+
+            if prontos:
+                progresso_situacao.progress(concluidos / total_chaves)
+                texto_progresso_situacao.caption(
+                    f"Situação PNCP ({rotulo_janela}): {concluidos} de "
+                    f"{total_chaves} item(ns) consultados."
+                )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    progresso_situacao.empty()
+    texto_progresso_situacao.empty()
+
+    return situacoes
+
+
+def enriquecer_situacao_pncp(resultados, data_final, max_workers=6):
+    """
+    Enriquecimento best-effort: a situacao do item (Homologado, Fracassado,
+    Deserto, Anulado/Revogado/Cancelado, Em andamento) so existe no PNCP para
+    compras conduzidas sob a Lei 14.133/2021. Compras sob legislacao anterior
+    nao tem essa informacao disponivel nessa base e ficam como None.
+
+    A publicacao no PNCP (dataInclusaoPncp) pode anteceder a dataCompra do
+    preco praticado em mais de 365 dias -- por exemplo, adesao a uma ata de
+    registro de precos (SRP) publicada no ano anterior. Como a API aceita no
+    maximo 365 dias por consulta, os codigos que nao acharem situacao na
+    janela mais recente sao tentados de novo numa segunda janela, um ano
+    antes da primeira.
+
+    Alem disso, alguns itens (sobretudo de Dispensa Eletronica) nao tem o
+    codItemCatalogo preenchido no lado do PNCP -- nesses casos a busca por
+    codigo de catalogo nunca encontra o item, mesmo na janela certa. Uma
+    terceira rodada busca esses itens restantes por UASG, casando pelo
+    idCompraItem.
+    """
+    if not resultados:
+        return resultados
+
+    codigos_item_catalogo = sorted({
+        int(item["codigoItemCatalogo"])
+        for item in resultados
+        if item.get("codigoItemCatalogo") is not None
+    })
+
+    if not codigos_item_catalogo:
+        return resultados
+
+    inicio_recente, fim_recente = montar_janela_situacao_pncp(data_final)
+
+    situacoes = consultar_situacoes_pncp_lote(
+        codigos_item_catalogo,
+        consultar_situacao_itens_pncp,
+        inicio_recente,
+        fim_recente,
+        max_workers,
+        ORCAMENTO_TEMPO_SITUACAO_PNCP_SEGUNDOS,
+        "por catálogo, últimos 12 meses"
+    )
+
+    codigos_pendentes = sorted({
+        int(item["codigoItemCatalogo"])
+        for item in resultados
+        if item.get("codigoItemCatalogo") is not None
+        and str(item.get("idCompraItem")) not in situacoes
+    })
+
+    if codigos_pendentes:
+        situacoes.update(
+            consultar_situacoes_pncp_lote(
+                codigos_pendentes,
+                consultar_situacao_itens_pncp,
+                inicio_recente - timedelta(days=365),
+                inicio_recente - timedelta(days=1),
+                max_workers,
+                ORCAMENTO_TEMPO_SITUACAO_PNCP_FALLBACK_SEGUNDOS,
+                "por catálogo, 12 a 24 meses atrás"
+            )
+        )
+
+    uasgs_pendentes = sorted({
+        str(item["codigoUasg"])
+        for item in resultados
+        if item.get("codigoUasg")
+        and str(item.get("idCompraItem")) not in situacoes
+    })
+
+    if uasgs_pendentes:
+        situacoes.update(
+            consultar_situacoes_pncp_lote(
+                uasgs_pendentes,
+                consultar_situacao_itens_pncp_por_uasg,
+                inicio_recente,
+                fim_recente,
+                MAX_WORKERS_SITUACAO_PNCP_UASG,
+                ORCAMENTO_TEMPO_SITUACAO_PNCP_UASG_SEGUNDOS,
+                "por UASG (itens sem código de catálogo no PNCP)"
+            )
+        )
+
+    encontrados = 0
+
+    for item in resultados:
+        situacao = situacoes.get(str(item.get("idCompraItem")))
+        item[COLUNA_SITUACAO_PNCP] = situacao
+
+        if situacao is not None:
+            encontrados += 1
+
+    st.caption(
+        f"Situação PNCP (Lei 14.133) localizada para {encontrados} de "
+        f"{len(resultados)} registro(s) de preço. Compras sob legislação "
+        "anterior não têm essa informação disponível nesta base e aparecem "
+        "como \"Não disponível\"."
+    )
+
+    return resultados
+
+
 def consultar_precos_multiplos_itens_catalogo(
     codigos_itens,
     data_inicial,
@@ -1695,6 +2112,44 @@ def aplicar_filtro_unidade_fornecimento(df, chave):
     return df_filtrado.drop(columns=[coluna_unidade_resumo])
 
 
+def aplicar_filtro_situacao_pncp(df, chave):
+    if COLUNA_SITUACAO_PNCP not in df.columns or df.empty:
+        return df
+
+    situacao_serie = df[COLUNA_SITUACAO_PNCP].fillna("Não disponível")
+    contagens = situacao_serie.value_counts().sort_index()
+
+    st.subheader("Filtro de situação do item (PNCP)")
+    st.caption(
+        "Situação disponível apenas para compras conduzidas sob a Lei "
+        "14.133/2021 e publicadas no PNCP. Itens sem essa informação "
+        "aparecem como \"Não disponível\" (compras sob legislação anterior "
+        "ou ainda não sincronizadas)."
+    )
+
+    situacoes_excluir_default = [
+        situacao
+        for situacao in contagens.index
+        if situacao in {"Fracassado", "Deserto", "Anulado/Revogado/Cancelado"}
+    ]
+
+    situacoes_excluir = st.multiselect(
+        "Excluir itens com esta situação do resumo estatístico",
+        options=contagens.index.tolist(),
+        default=situacoes_excluir_default,
+        format_func=lambda situacao: f"{situacao} ({int(contagens[situacao])})",
+        key=f"filtro_situacao_pncp_{chave}"
+    )
+
+    if not situacoes_excluir:
+        return df
+
+    df_filtrado = df[~situacao_serie.isin(situacoes_excluir)].copy()
+    st.write("Registros considerados após filtro de situação:", len(df_filtrado))
+
+    return df_filtrado
+
+
 def calcular_estatisticas_serie(serie_precos):
     precos = pd.to_numeric(serie_precos, errors="coerce").dropna()
 
@@ -2088,6 +2543,65 @@ def exibir_indicador_dispersao(estatisticas):
         )
 
 
+def exibir_tabela_com_link_idcompra(df, **kwargs):
+    if df is None or df.empty or "idCompra" not in df.columns:
+        st.dataframe(df, **kwargs)
+        return
+
+    df_exibicao = montar_colunas_extras_compra(df)
+
+    column_config = dict(kwargs.pop("column_config", None) or {})
+
+    if COLUNA_LINK_ACOMPANHAMENTO_COMPRA in df_exibicao.columns:
+        column_config[COLUNA_LINK_ACOMPANHAMENTO_COMPRA] = st.column_config.LinkColumn(
+            COLUNA_LINK_ACOMPANHAMENTO_COMPRA,
+            help="Abre o acompanhamento da compra no Comprasnet",
+            display_text="Abrir"
+        )
+
+    if COLUNA_LINK_PROPOSTAS_ITEM in df_exibicao.columns:
+        column_config[COLUNA_LINK_PROPOSTAS_ITEM] = st.column_config.LinkColumn(
+            COLUNA_LINK_PROPOSTAS_ITEM,
+            help="Abre as propostas do item específico no Comprasnet",
+            display_text="Abrir"
+        )
+
+    st.dataframe(df_exibicao, column_config=column_config, **kwargs)
+
+
+def exibir_botao_situacao_pncp(df_precos, data_final, chave_sessao_df, chave_widget):
+    """
+    A busca de situacao PNCP e separada da consulta de precos de proposito:
+    e uma etapa best-effort que pode levar ate minutos em consultas amplas
+    (centenas de orgaos diferentes). Deixando-a como uma acao separada, o
+    usuario pode interromper so essa etapa clicando em "Stop" (canto
+    superior direito) sem perder os precos ja carregados, que ja estao
+    salvos no session_state antes deste botao existir.
+    """
+    if df_precos is None or df_precos.empty or COLUNA_SITUACAO_PNCP in df_precos.columns:
+        return
+
+    st.info(
+        "Situação PNCP (Lei 14.133) ainda não foi consultada para estes "
+        "itens. É uma busca best-effort e, dependendo da quantidade de "
+        "itens e órgãos diferentes envolvidos, pode levar vários minutos "
+        "(até ~10 minutos em consultas amplas). Você pode clicar em "
+        "\"Stop\", no canto superior direito, a qualquer momento para "
+        "desistir — os preços já carregados não serão perdidos."
+    )
+
+    if st.button(
+        "Buscar situação PNCP (Lei 14.133) dos itens",
+        key=chave_widget
+    ):
+        resultados_enriquecidos = enriquecer_situacao_pncp(
+            df_precos.to_dict("records"),
+            data_final
+        )
+        st.session_state[chave_sessao_df] = pd.DataFrame(resultados_enriquecidos)
+        st.rerun()
+
+
 def exibir_estatisticas_precos(df):
     st.subheader("Resumo estatístico dos preços")
 
@@ -2212,7 +2726,7 @@ def exibir_estatisticas_precos(df):
         + colunas_restantes
     )
 
-    st.dataframe(
+    exibir_tabela_com_link_idcompra(
         df_outliers[colunas_exibicao],
         use_container_width=True,
         hide_index=True
@@ -3028,10 +3542,21 @@ with aba_principal:
         if df_precos.empty:
             st.warning(f"Nenhum preço retornado para o(s) código(s) {tipo_precos} selecionado(s).")
         else:
-            st.dataframe(df_precos, use_container_width=True)
+            exibir_tabela_com_link_idcompra(df_precos, use_container_width=True)
+
+            exibir_botao_situacao_pncp(
+                df_precos,
+                st.session_state.get("data_final_precos_final"),
+                "df_precos",
+                f"btn_situacao_pncp_{tipo_precos.lower()}"
+            )
 
             df_precos_analise = aplicar_filtro_unidade_fornecimento(
                 df_precos,
+                f"{tipo_precos.lower()}_consolidado"
+            )
+            df_precos_analise = aplicar_filtro_situacao_pncp(
+                df_precos_analise,
                 f"{tipo_precos.lower()}_consolidado"
             )
 
@@ -3202,57 +3727,79 @@ with aba_direta:
                     retornar_diagnostico=True
                 )
 
-            diagnostico_preco = diagnostico_precos[0] if diagnostico_precos else {}
-            total_registros = diagnostico_preco.get("totalRegistrosAPI")
-            total_paginas = diagnostico_preco.get("totalPaginasAPI")
-
-            st.write("Total de registros informado pela API:", total_registros)
-            st.write("Total de páginas informado pela API:", total_paginas)
-            st.write("Registros carregados no app:", len(resultados))
-
-            removidos_por_periodo = diagnostico_preco.get("removidosPorFiltroData", 0)
-
-            if removidos_por_periodo:
-                st.info(
-                    f"{removidos_por_periodo} registro(s) fora do período informado foram ignorados localmente."
-                )
-
-            with st.expander("URLs consultadas"):
-                st.write(urls)
-
-            if diagnostico_precos:
-                with st.expander("Diagnóstico por código consultado", expanded=not resultados):
-                    st.dataframe(
-                        pd.DataFrame(diagnostico_precos),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-            if erros:
-                st.warning("A consulta retornou erro em uma ou mais páginas.")
-                st.json(erros)
-
-            if resultados:
-                df = pd.DataFrame(resultados)
-
-                st.subheader("Resultado em tabela")
-                st.dataframe(df, use_container_width=True)
-
-                exibir_estatisticas_precos(df)
-
-                csv = df.to_csv(index=False).encode("utf-8-sig")
-
-                st.download_button(
-                    label="Baixar resultado em CSV",
-                    data=csv,
-                    file_name="pesquisa_precos_catmat.csv",
-                    mime="text/csv"
-                )
-
-                with st.expander("Ver dados brutos"):
-                    st.json(resultados)
-            else:
-                st.warning("Nenhum registro retornado para os parâmetros informados.")
+            st.session_state["resultados_precos_direto"] = resultados
+            st.session_state["erros_precos_direto"] = erros
+            st.session_state["urls_precos_direto"] = urls
+            st.session_state["diagnostico_precos_direto"] = diagnostico_precos
+            st.session_state["df_precos_direto"] = pd.DataFrame(resultados)
+            st.session_state["data_final_precos_direto"] = data_final_direta
 
         except ValueError:
             st.error("O código CATMAT deve ser numérico.")
+
+    if "df_precos_direto" in st.session_state:
+        resultados = st.session_state["resultados_precos_direto"]
+        erros = st.session_state["erros_precos_direto"]
+        urls = st.session_state["urls_precos_direto"]
+        diagnostico_precos = st.session_state["diagnostico_precos_direto"]
+        df = st.session_state["df_precos_direto"]
+
+        diagnostico_preco = diagnostico_precos[0] if diagnostico_precos else {}
+        total_registros = diagnostico_preco.get("totalRegistrosAPI")
+        total_paginas = diagnostico_preco.get("totalPaginasAPI")
+
+        st.write("Total de registros informado pela API:", total_registros)
+        st.write("Total de páginas informado pela API:", total_paginas)
+        st.write("Registros carregados no app:", len(resultados))
+
+        removidos_por_periodo = diagnostico_preco.get("removidosPorFiltroData", 0)
+
+        if removidos_por_periodo:
+            st.info(
+                f"{removidos_por_periodo} registro(s) fora do período informado foram ignorados localmente."
+            )
+
+        with st.expander("URLs consultadas"):
+            st.write(urls)
+
+        if diagnostico_precos:
+            with st.expander("Diagnóstico por código consultado", expanded=not resultados):
+                st.dataframe(
+                    pd.DataFrame(diagnostico_precos),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        if erros:
+            st.warning("A consulta retornou erro em uma ou mais páginas.")
+            st.json(erros)
+
+        if resultados:
+            st.subheader("Resultado em tabela")
+            exibir_tabela_com_link_idcompra(df, use_container_width=True)
+
+            exibir_botao_situacao_pncp(
+                df,
+                st.session_state.get("data_final_precos_direto"),
+                "df_precos_direto",
+                "btn_situacao_pncp_direto"
+            )
+            df = st.session_state["df_precos_direto"]
+
+            df_filtrado = aplicar_filtro_situacao_pncp(df, "consulta_direta")
+
+            exibir_estatisticas_precos(df_filtrado)
+
+            csv = df.to_csv(index=False).encode("utf-8-sig")
+
+            st.download_button(
+                label="Baixar resultado em CSV",
+                data=csv,
+                file_name="pesquisa_precos_catmat.csv",
+                mime="text/csv"
+            )
+
+            with st.expander("Ver dados brutos"):
+                st.json(resultados)
+        else:
+            st.warning("Nenhum registro retornado para os parâmetros informados.")
